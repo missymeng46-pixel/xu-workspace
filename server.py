@@ -1,0 +1,1105 @@
+#!/usr/bin/env python3
+"""Local-first HTTP server and SQLite API for XU Workspace."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hmac
+import ipaddress
+import io
+import json
+import os
+import re
+import secrets
+import socket
+import sqlite3
+import subprocess
+import time
+from datetime import date, datetime, timedelta
+from functools import partial
+from http import HTTPStatus
+from http.cookies import SimpleCookie
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+
+APP_DIR = Path(__file__).resolve().parent
+STATIC_ROOT = APP_DIR
+DATA_DIR = APP_DIR / "data"
+DB_PATH = DATA_DIR / "xu.sqlite3"
+ENV_PATH = APP_DIR / ".env"
+MOBILE_COOKIE = "xu_mobile_session"
+MOBILE_ACCESS = {
+    "enabled": False,
+    "port": 4173,
+    "lan_ip": "",
+    "access_code": "",
+    "session_token": "",
+}
+LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+
+
+def find_lan_ip() -> str:
+    """Return the address other devices on the current network can reach."""
+    private_networks = tuple(ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+    def usable(ip: str) -> bool:
+        try:
+            address = ipaddress.ip_address(ip)
+            return address.version == 4 and any(address in network for network in private_networks)
+        except ValueError:
+            return False
+
+    # On macOS the default route may point at a VPN. Physical interfaces are a
+    # better source for the address another device on the same Wi-Fi can reach.
+    for interface in ("en0", "en1", "en2", "en3", "en4", "en5"):
+        try:
+            candidate = subprocess.check_output(
+                ["ipconfig", "getifaddr", interface], stderr=subprocess.DEVNULL, text=True, timeout=1
+            ).strip()
+            if usable(candidate):
+                return candidate
+        except (FileNotFoundError, subprocess.SubprocessError):
+            continue
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        candidate = str(probe.getsockname()[0])
+        return candidate if usable(candidate) else ""
+    except OSError:
+        try:
+            candidates = socket.gethostbyname_ex(socket.gethostname())[2]
+            return next((ip for ip in candidates if usable(ip)), "")
+        except OSError:
+            return ""
+    finally:
+        probe.close()
+
+
+def load_env() -> None:
+    if not ENV_PATH.exists():
+        return
+    for raw_line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def connect() -> sqlite3.Connection:
+    DATA_DIR.mkdir(exist_ok=True)
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+
+def init_database() -> None:
+    load_env()
+    with connect() as db:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL DEFAULT 'other',
+                opening_balance REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('income', 'expense')),
+                color TEXT NOT NULL DEFAULT '#151718',
+                UNIQUE(name, kind)
+            );
+
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL CHECK(kind IN ('income', 'expense')),
+                amount REAL NOT NULL CHECK(amount > 0),
+                transaction_date TEXT NOT NULL,
+                category_id INTEGER NOT NULL REFERENCES categories(id),
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
+                project TEXT NOT NULL DEFAULT '',
+                counterparty TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id INTEGER NOT NULL REFERENCES categories(id),
+                month TEXT NOT NULL,
+                limit_amount REAL NOT NULL CHECK(limit_amount >= 0),
+                UNIQUE(category_id, month)
+            );
+
+            CREATE TABLE IF NOT EXISTS monthly_budgets (
+                month TEXT PRIMARY KEY,
+                amount REAL NOT NULL CHECK(amount >= 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS exercise_checkins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exercise_date TEXT NOT NULL UNIQUE,
+                activity TEXT NOT NULL,
+                duration_minutes INTEGER CHECK(duration_minutes IS NULL OR duration_minutes >= 0),
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS inbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_text TEXT NOT NULL,
+                inferred_type TEXT NOT NULL DEFAULT 'note',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'doing', 'review')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS content_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'idea' CHECK(status IN ('idea', 'creating', 'ready', 'published')),
+                source_inbox_id INTEGER UNIQUE REFERENCES inbox(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                source_inbox_id INTEGER UNIQUE REFERENCES inbox(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        db.executemany(
+            "INSERT OR IGNORE INTO app_settings(key, value) VALUES (?, ?)",
+            [("display_name", "新朋友"), ("workspace_name", "我的工作空间")],
+        )
+        inbox_columns = {row["name"] for row in db.execute("PRAGMA table_info(inbox)")}
+        if "analysis_json" not in inbox_columns:
+            db.execute("ALTER TABLE inbox ADD COLUMN analysis_json TEXT NOT NULL DEFAULT '{}' ")
+        if "processed_at" not in inbox_columns:
+            db.execute("ALTER TABLE inbox ADD COLUMN processed_at TEXT")
+        if "destination_id" not in inbox_columns:
+            db.execute("ALTER TABLE inbox ADD COLUMN destination_id INTEGER")
+        if db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0:
+            seed_database(db)
+        orphaned_projects = db.execute(
+            """
+            SELECT id, raw_text, analysis_json FROM inbox
+            WHERE status='processed' AND inferred_type='project' AND destination_id IS NULL
+            """
+        ).fetchall()
+        for item in orphaned_projects:
+            analysis = parse_json_object(item["analysis_json"])
+            title = str(analysis.get("title") or item["raw_text"]).strip()[:160]
+            cursor = db.execute(
+                "INSERT INTO projects(title, description, status) VALUES (?, ?, 'todo')",
+                (title, item["raw_text"][:500]),
+            )
+            db.execute("UPDATE inbox SET destination_id=? WHERE id=?", (cursor.lastrowid, item["id"]))
+        orphaned_content = db.execute(
+            "SELECT id, raw_text, analysis_json FROM inbox WHERE status='processed' AND inferred_type='content' AND destination_id IS NULL"
+        ).fetchall()
+        for item in orphaned_content:
+            analysis = parse_json_object(item["analysis_json"])
+            title = str(analysis.get("title") or item["raw_text"]).strip()[:200]
+            db.execute(
+                "INSERT OR IGNORE INTO content_items(title, description, source_inbox_id) VALUES (?, ?, ?)",
+                (title, item["raw_text"][:800], item["id"]),
+            )
+            destination = db.execute("SELECT id FROM content_items WHERE source_inbox_id=?", (item["id"],)).fetchone()["id"]
+            db.execute("UPDATE inbox SET destination_id=? WHERE id=?", (destination, item["id"]))
+        orphaned_notes = db.execute(
+            "SELECT id, raw_text, analysis_json FROM inbox WHERE status='processed' AND inferred_type='note' AND destination_id IS NULL"
+        ).fetchall()
+        for item in orphaned_notes:
+            analysis = parse_json_object(item["analysis_json"])
+            title = str(analysis.get("title") or item["raw_text"]).strip()[:200]
+            db.execute(
+                "INSERT OR IGNORE INTO notes(title, body, source_inbox_id) VALUES (?, ?, ?)",
+                (title, item["raw_text"][:2000], item["id"]),
+            )
+            destination = db.execute("SELECT id FROM notes WHERE source_inbox_id=?", (item["id"],)).fetchone()["id"]
+            db.execute("UPDATE inbox SET destination_id=? WHERE id=?", (destination, item["id"]))
+
+
+def seed_database(db: sqlite3.Connection) -> None:
+    accounts = [
+        ("微信", "wallet", 0),
+        ("支付宝", "wallet", 0),
+        ("银行卡", "bank", 0),
+        ("现金", "cash", 0),
+    ]
+    db.executemany("INSERT INTO accounts(name, type, opening_balance) VALUES (?, ?, ?)", accounts)
+
+    categories = [
+        ("项目收入", "income", "#386e5a"),
+        ("其他收入", "income", "#9dc8eb"),
+        ("餐饮", "expense", "#f16c3d"),
+        ("项目成本", "expense", "#151718"),
+        ("软件订阅", "expense", "#9dc8eb"),
+        ("交通", "expense", "#eaa251"),
+        ("学习成长", "expense", "#f2e429"),
+        ("生活固定", "expense", "#777d7e"),
+        ("其他支出", "expense", "#c6cacb"),
+    ]
+    db.executemany("INSERT INTO categories(name, kind, color) VALUES (?, ?, ?)", categories)
+
+
+
+def row_dict(row: sqlite3.Row) -> dict:
+    return {key: row[key] for key in row.keys()}
+
+
+def parse_json_object(value: str | None) -> dict:
+    try:
+        return json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def inbox_payload(db: sqlite3.Connection) -> list[dict]:
+    items = []
+    for row in db.execute(
+        """
+        SELECT id, raw_text AS rawText, inferred_type AS inferredType, status,
+               analysis_json AS analysisJson, destination_id AS destinationId,
+               created_at AS createdAt, processed_at AS processedAt
+        FROM inbox ORDER BY id DESC
+        """
+    ):
+        item = row_dict(row)
+        item["analysis"] = parse_json_object(item.pop("analysisJson", "{}"))
+        items.append(item)
+    return items
+
+
+def normalize_classification(result: dict, raw_text: str) -> dict:
+    item_type = str(result.get("type", "note")).lower()
+    if item_type not in {"task", "transaction", "content", "project", "note"}:
+        item_type = "note"
+    title = str(result.get("title") or raw_text).strip()[:240]
+    due_date = str(result.get("dueDate") or "").strip()
+    try:
+        due_date = date.fromisoformat(due_date).isoformat() if due_date else ""
+    except ValueError:
+        due_date = ""
+    try:
+        confidence = max(0, min(1, float(result.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0
+    transaction_kind = str(result.get("transactionKind") or "").lower()
+    if transaction_kind not in {"income", "expense"}:
+        transaction_kind = ""
+    try:
+        amount = abs(round(float(result.get("amount")), 2)) if result.get("amount") not in {None, ""} else None
+    except (TypeError, ValueError):
+        amount = None
+    return {
+        "type": item_type,
+        "title": title,
+        "dueDate": due_date,
+        "summary": str(result.get("summary") or "").strip()[:300],
+        "confidence": confidence,
+        "transactionKind": transaction_kind,
+        "amount": amount,
+        "counterparty": str(result.get("counterparty") or "").strip()[:100],
+    }
+
+
+def classify_with_deepseek(raw_text: str) -> dict:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("DeepSeek API 尚未配置")
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    today = date.today().isoformat()
+    system_prompt = f"""你是个人工作空间的收件箱分类器。今天是 {today}。
+只返回 JSON 对象，不要 Markdown。字段必须为：
+type: task|transaction|content|project|note；
+title: 精炼后的中文标题；
+dueDate: YYYY-MM-DD 或空字符串；
+summary: 一句分类理由；
+confidence: 0 到 1。
+如果是 transaction，额外返回 transactionKind: income|expense、amount: 数字或 null、counterparty: 对方或空字符串；其他类型也保留这三个字段为空。
+出现“今天要、需要、提醒、完成、待办、记得”等明确行动时优先判为 task；内容选题或创作灵感判为 content；真实收支记录判为 transaction。不要凭空补充金额、日期或事实。"""
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_text[:1000]},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 350,
+    }, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        f"{base_url}/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"DeepSeek 请求失败（HTTP {exc.code}）") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError("无法连接 DeepSeek，请稍后重试") from exc
+    try:
+        content = payload["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I)
+        return normalize_classification(json.loads(content), raw_text)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("DeepSeek 返回了无法识别的分类结果") from exc
+
+
+def classify_inbox_record(db: sqlite3.Connection, inbox_id: int) -> dict:
+    row = db.execute("SELECT id, raw_text FROM inbox WHERE id=?", (inbox_id,)).fetchone()
+    if not row:
+        raise ValueError("收件箱记录不存在")
+    analysis = classify_with_deepseek(row["raw_text"])
+    db.execute(
+        "UPDATE inbox SET inferred_type=?, status='review', analysis_json=? WHERE id=?",
+        (analysis["type"], json.dumps(analysis, ensure_ascii=False), inbox_id),
+    )
+    return analysis
+
+
+def month_bounds(month: str | None = None) -> tuple[str, str, str]:
+    month = month or date.today().strftime("%Y-%m")
+    start = date.fromisoformat(f"{month}-01")
+    next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return month, start.isoformat(), next_month.isoformat()
+
+
+def finance_payload(db: sqlite3.Connection, month: str | None = None) -> dict:
+    month, start, end = month_bounds(month)
+    totals = db.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN kind='income' THEN amount END), 0) AS income,
+            COALESCE(SUM(CASE WHEN kind='expense' THEN amount END), 0) AS expense
+        FROM transactions WHERE transaction_date >= ? AND transaction_date < ?
+        """,
+        (start, end),
+    ).fetchone()
+    all_time = db.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN kind='income' THEN amount ELSE -amount END), 0) AS movement
+        FROM transactions
+        """
+    ).fetchone()["movement"]
+    opening = db.execute("SELECT COALESCE(SUM(opening_balance), 0) FROM accounts").fetchone()[0]
+    breakdown = [
+        row_dict(row)
+        for row in db.execute(
+            """
+            SELECT c.id, c.name, c.color, ROUND(SUM(t.amount), 2) AS amount
+            FROM transactions t JOIN categories c ON c.id=t.category_id
+            WHERE t.kind='expense' AND t.transaction_date >= ? AND t.transaction_date < ?
+            GROUP BY c.id, c.name, c.color ORDER BY amount DESC
+            """,
+            (start, end),
+        )
+    ]
+    budget_row = db.execute("SELECT amount FROM monthly_budgets WHERE month=?", (month,)).fetchone()
+    budget = round(float(budget_row["amount"]), 2) if budget_row else 15000
+    return {
+        "month": month,
+        "income": round(totals["income"], 2),
+        "expense": round(totals["expense"], 2),
+        "net": round(totals["income"] - totals["expense"], 2),
+        "netWorth": round(opening + all_time, 2),
+        "receivable": 0,
+        "budget": budget,
+        "budgetRemaining": round(budget - totals["expense"], 2),
+        "breakdown": breakdown,
+    }
+
+
+def exercise_payload(db: sqlite3.Connection) -> list[dict]:
+    return [
+        row_dict(row)
+        for row in db.execute(
+            """
+            SELECT id, exercise_date AS date, activity, duration_minutes AS durationMinutes,
+                   note, created_at AS createdAt, updated_at AS updatedAt
+            FROM exercise_checkins ORDER BY exercise_date DESC, id DESC LIMIT 400
+            """
+        )
+    ]
+
+
+def validate_exercise(payload: dict) -> dict:
+    exercise_date = str(payload.get("date", "")).strip()
+    date.fromisoformat(exercise_date)
+    activity = str(payload.get("activity", "")).strip()
+    if not activity:
+        raise ValueError("请填写今天主要运动了什么")
+    raw_duration = payload.get("durationMinutes")
+    duration = None if raw_duration in {None, ""} else int(raw_duration)
+    if duration is not None and not 0 <= duration <= 1440:
+        raise ValueError("运动时长需要在 0 到 1440 分钟之间")
+    return {
+        "date": exercise_date,
+        "activity": activity[:120],
+        "durationMinutes": duration,
+        "note": str(payload.get("note", "")).strip()[:500],
+    }
+
+
+def transactions_payload(db: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    return [
+        row_dict(row)
+        for row in db.execute(
+            """
+            SELECT t.id, t.kind, t.amount, t.transaction_date AS date,
+                   t.category_id AS categoryId, c.name AS category, c.color,
+                   t.account_id AS accountId, a.name AS account,
+                   t.project, t.counterparty, t.note
+            FROM transactions t
+            JOIN categories c ON c.id=t.category_id
+            JOIN accounts a ON a.id=t.account_id
+            ORDER BY t.transaction_date DESC, t.id DESC LIMIT ?
+            """,
+            (limit,),
+        )
+    ]
+
+
+def read_json(handler: SimpleHTTPRequestHandler) -> dict:
+    size = int(handler.headers.get("Content-Length", "0"))
+    if size > 5_000_000:
+        raise ValueError("请求内容过大")
+    raw = handler.rfile.read(size)
+    return json.loads(raw or b"{}")
+
+
+def validate_transaction(payload: dict, db: sqlite3.Connection) -> dict:
+    kind = str(payload.get("kind", "")).strip()
+    if kind not in {"income", "expense"}:
+        raise ValueError("收支类型无效")
+    try:
+        amount = round(float(payload.get("amount", 0)), 2)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("金额格式无效") from exc
+    if amount <= 0:
+        raise ValueError("金额必须大于 0")
+    tx_date = str(payload.get("date", "")).strip()
+    date.fromisoformat(tx_date)
+    category_id = int(payload.get("categoryId", 0))
+    account_id = int(payload.get("accountId", 0))
+    category = db.execute("SELECT id FROM categories WHERE id=? AND kind=?", (category_id, kind)).fetchone()
+    account = db.execute("SELECT id FROM accounts WHERE id=?", (account_id,)).fetchone()
+    if not category or not account:
+        raise ValueError("账户或分类无效")
+    return {
+        "kind": kind,
+        "amount": amount,
+        "date": tx_date,
+        "categoryId": category_id,
+        "accountId": account_id,
+        "project": str(payload.get("project", "")).strip()[:100],
+        "counterparty": str(payload.get("counterparty", "")).strip()[:100],
+        "note": str(payload.get("note", "")).strip()[:300],
+    }
+
+
+def ensure_named_record(db: sqlite3.Connection, table: str, name: str, kind: str | None = None) -> int:
+    if table == "accounts":
+        row = db.execute("SELECT id FROM accounts WHERE name=?", (name,)).fetchone()
+        if not row:
+            db.execute("INSERT INTO accounts(name, type) VALUES (?, 'other')", (name,))
+    else:
+        row = db.execute("SELECT id FROM categories WHERE name=? AND kind=?", (name, kind)).fetchone()
+        if not row:
+            color = "#386e5a" if kind == "income" else "#c6cacb"
+            db.execute("INSERT INTO categories(name, kind, color) VALUES (?, ?, ?)", (name, kind, color))
+    row = db.execute(
+        f"SELECT id FROM {table} WHERE name=?" + (" AND kind=?" if table == "categories" else ""),
+        (name, kind) if table == "categories" else (name,),
+    ).fetchone()
+    return int(row["id"])
+
+
+def import_csv(db: sqlite3.Connection, text: str) -> dict:
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
+    required = {"日期", "类型", "金额", "分类", "账户"}
+    if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+        raise ValueError("CSV 需要包含：日期、类型、金额、分类、账户")
+    imported = 0
+    errors = []
+    for line_number, row in enumerate(reader, start=2):
+        try:
+            kind_text = row["类型"].strip().lower()
+            kind = "income" if kind_text in {"收入", "income", "入账"} else "expense"
+            amount = abs(float(row["金额"].replace(",", "").replace("¥", "").strip()))
+            tx_date = date.fromisoformat(row["日期"].strip()).isoformat()
+            account_id = ensure_named_record(db, "accounts", row["账户"].strip() or "其他账户")
+            category_id = ensure_named_record(db, "categories", row["分类"].strip() or ("其他收入" if kind == "income" else "其他支出"), kind)
+            db.execute(
+                """
+                INSERT INTO transactions(kind, amount, transaction_date, category_id, account_id, project, counterparty, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (kind, amount, tx_date, category_id, account_id, row.get("项目", "").strip(), row.get("对方", "").strip(), row.get("备注", "").strip()),
+            )
+            imported += 1
+        except Exception as exc:  # Keep valid rows and report invalid ones.
+            errors.append(f"第 {line_number} 行：{exc}")
+    return {"imported": imported, "errors": errors[:20]}
+
+
+class XUHandler(SimpleHTTPRequestHandler):
+    server_version = "XUWorkspace/0.2"
+
+    def is_local_client(self) -> bool:
+        raw_host = self.headers.get("Host", "").lower()
+        host = raw_host[1:].split("]", 1)[0] if raw_host.startswith("[") else raw_host.split(":", 1)[0]
+        return self.client_address[0] in {"127.0.0.1", "::1"} and host in {"127.0.0.1", "localhost", "::1"}
+
+    def is_authorized(self) -> bool:
+        if self.is_local_client():
+            return True
+        raw_cookie = self.headers.get("Cookie", "")
+        try:
+            cookie = SimpleCookie(raw_cookie)
+            supplied = cookie.get(MOBILE_COOKIE)
+            token = supplied.value if supplied else ""
+        except Exception:
+            token = ""
+        expected = str(MOBILE_ACCESS["session_token"])
+        return bool(token and expected and hmac.compare_digest(token, expected))
+
+    def require_authorized(self) -> bool:
+        if self.is_authorized():
+            return True
+        self.send_error_json("请先输入 Mac 上显示的手机访问码", HTTPStatus.UNAUTHORIZED, code="mobile_auth_required")
+        return False
+
+    def end_headers(self) -> None:
+        if not urlparse(self.path).path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
+
+    def log_message(self, format: str, *args) -> None:
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
+    def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK, headers: dict[str, str] | None = None) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_error_json(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST, code: str = "") -> None:
+        payload = {"error": message}
+        if code:
+            payload["code"] = code
+        self.send_json(payload, status)
+
+    def handle_mobile_login(self, payload: dict) -> None:
+        client_ip = self.client_address[0]
+        now = time.monotonic()
+        recent = [stamp for stamp in LOGIN_ATTEMPTS.get(client_ip, []) if now - stamp < 60]
+        if len(recent) >= 5:
+            LOGIN_ATTEMPTS[client_ip] = recent
+            self.send_error_json("尝试次数过多，请60秒后再试", HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        supplied = re.sub(r"\D", "", str(payload.get("code", "")))
+        expected = str(MOBILE_ACCESS["access_code"])
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            recent.append(now)
+            LOGIN_ATTEMPTS[client_ip] = recent
+            self.send_error_json("访问码不正确")
+            return
+        LOGIN_ATTEMPTS.pop(client_ip, None)
+        cookie = f"{MOBILE_COOKIE}={MOBILE_ACCESS['session_token']}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200"
+        self.send_json({"ok": True}, headers={"Set-Cookie": cookie})
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/api/"):
+            if parsed.path in {"/xu-workspace", "/xu-workspace/"}:
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/")
+                self.end_headers()
+                return
+            return super().do_GET()
+        if parsed.path == "/api/health":
+            payload = {"ok": True}
+            if self.is_local_client():
+                payload.update({"database": str(DB_PATH), "mobileAccess": bool(MOBILE_ACCESS["enabled"])})
+            return self.send_json(payload)
+        if parsed.path == "/api/session":
+            return self.send_json({"authorized": self.is_authorized(), "local": self.is_local_client()})
+        if parsed.path == "/api/mobile-access":
+            if not self.is_local_client():
+                return self.send_error_json("只能在这台 Mac 上查看手机访问码", HTTPStatus.FORBIDDEN)
+            lan_ip = str(MOBILE_ACCESS["lan_ip"])
+            url = f"http://{lan_ip}:{MOBILE_ACCESS['port']}/" if lan_ip else ""
+            return self.send_json({
+                "enabled": bool(MOBILE_ACCESS["enabled"] and lan_ip),
+                "url": url,
+                "accessCode": MOBILE_ACCESS["access_code"],
+            })
+        if not self.require_authorized():
+            return
+        try:
+            with connect() as db:
+                if parsed.path == "/api/bootstrap":
+                    settings = {row["key"]: row["value"] for row in db.execute("SELECT key, value FROM app_settings")}
+                    self.send_json({
+                        "summary": finance_payload(db),
+                        "transactions": transactions_payload(db),
+                        "accounts": [row_dict(r) for r in db.execute("SELECT id, name, type, opening_balance AS openingBalance FROM accounts ORDER BY id")],
+                        "categories": [row_dict(r) for r in db.execute("SELECT id, name, kind, color FROM categories ORDER BY kind DESC, id")],
+                        "inbox": inbox_payload(db),
+                        "tasks": [row_dict(r) for r in db.execute("SELECT id, title, due_date AS dueDate, completed_at AS completedAt, created_at AS createdAt FROM tasks ORDER BY due_date DESC, id DESC LIMIT 200")],
+                        "projects": [row_dict(r) for r in db.execute("SELECT id, title, description, status, created_at AS createdAt FROM projects ORDER BY id DESC")],
+                        "contentItems": [row_dict(r) for r in db.execute("SELECT id, title, description, status, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM content_items ORDER BY id DESC")],
+                        "exerciseCheckins": exercise_payload(db),
+                        "notes": [row_dict(r) for r in db.execute("SELECT id, title, body, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM notes ORDER BY id DESC")],
+                        "profile": {
+                            "displayName": settings.get("display_name", "新朋友"),
+                            "workspaceName": settings.get("workspace_name", "我的工作空间"),
+                        },
+                        "client": {"local": self.is_local_client()},
+                    })
+                else:
+                    self.send_error_json("接口不存在", HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            self.send_error_json(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            payload = read_json(self)
+            if parsed.path == "/api/mobile-login":
+                return self.handle_mobile_login(payload)
+            if not self.require_authorized():
+                return
+            with connect() as db:
+                if parsed.path == "/api/transactions":
+                    tx = validate_transaction(payload, db)
+                    cursor = db.execute(
+                        """
+                        INSERT INTO transactions(kind, amount, transaction_date, category_id, account_id, project, counterparty, note)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (tx["kind"], tx["amount"], tx["date"], tx["categoryId"], tx["accountId"], tx["project"], tx["counterparty"], tx["note"]),
+                    )
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/projects":
+                    title = str(payload.get("title", "")).strip()
+                    description = str(payload.get("description", "")).strip()
+                    status = str(payload.get("status", "todo")).strip()
+                    if not title:
+                        raise ValueError("项目名称不能为空")
+                    if status not in {"todo", "doing", "review"}:
+                        raise ValueError("项目状态无效")
+                    cursor = db.execute(
+                        "INSERT INTO projects(title, description, status) VALUES (?, ?, ?)",
+                        (title[:160], description[:500], status),
+                    )
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/content":
+                    title = str(payload.get("title", "")).strip()
+                    description = str(payload.get("description", "")).strip()
+                    status = str(payload.get("status", "idea")).strip()
+                    if not title:
+                        raise ValueError("内容标题不能为空")
+                    if status not in {"idea", "creating", "ready", "published"}:
+                        raise ValueError("内容状态无效")
+                    cursor = db.execute(
+                        "INSERT INTO content_items(title, description, status) VALUES (?, ?, ?)",
+                        (title[:200], description[:800], status),
+                    )
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/exercise":
+                    exercise = validate_exercise(payload)
+                    try:
+                        cursor = db.execute(
+                            """
+                            INSERT INTO exercise_checkins(exercise_date, activity, duration_minutes, note)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (exercise["date"], exercise["activity"], exercise["durationMinutes"], exercise["note"]),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ValueError("这一天已经打卡了，可以点击当日记录进行修改") from exc
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/tasks":
+                    title = str(payload.get("title", "")).strip()
+                    due_date = str(payload.get("dueDate", "")).strip()
+                    if not title:
+                        raise ValueError("任务内容不能为空")
+                    date.fromisoformat(due_date)
+                    cursor = db.execute("INSERT INTO tasks(title, due_date) VALUES (?, ?)", (title[:240], due_date))
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/import":
+                    self.send_json(import_csv(db, str(payload.get("csv", ""))))
+                elif parsed.path == "/api/inbox":
+                    text = str(payload.get("text", "")).strip()
+                    if not text:
+                        raise ValueError("记录内容不能为空")
+                    cursor = db.execute("INSERT INTO inbox(raw_text) VALUES (?)", (text[:1000],))
+                    inbox_id = int(cursor.lastrowid)
+                    try:
+                        analysis = classify_inbox_record(db, inbox_id)
+                        self.send_json({"id": inbox_id, "analysis": analysis}, HTTPStatus.CREATED)
+                    except RuntimeError as exc:
+                        self.send_json({"id": inbox_id, "warning": str(exc)}, HTTPStatus.CREATED)
+                elif match := re.fullmatch(r"/api/inbox/(\d+)/classify", parsed.path):
+                    analysis = classify_inbox_record(db, int(match.group(1)))
+                    self.send_json({"ok": True, "analysis": analysis})
+                elif match := re.fullmatch(r"/api/inbox/(\d+)/confirm", parsed.path):
+                    inbox_id = int(match.group(1))
+                    item = db.execute(
+                        "SELECT id, raw_text, inferred_type, status, analysis_json FROM inbox WHERE id=?",
+                        (inbox_id,),
+                    ).fetchone()
+                    if not item:
+                        raise ValueError("收件箱记录不存在")
+                    if item["status"] == "processed":
+                        return self.send_json({"ok": True, "alreadyProcessed": True})
+                    analysis = parse_json_object(item["analysis_json"])
+                    item_type = str(payload.get("type") or analysis.get("type") or item["inferred_type"])
+                    title = str(payload.get("title") or analysis.get("title") or item["raw_text"]).strip()[:240]
+                    due_date = str(payload.get("dueDate") or analysis.get("dueDate") or date.today().isoformat())
+                    destination_id = None
+                    if item_type == "task":
+                        date.fromisoformat(due_date)
+                        task_cursor = db.execute("INSERT INTO tasks(title, due_date) VALUES (?, ?)", (title, due_date))
+                        destination_id = int(task_cursor.lastrowid)
+                    elif item_type == "project":
+                        project_cursor = db.execute(
+                            "INSERT INTO projects(title, description, status) VALUES (?, ?, 'todo')",
+                            (title[:160], item["raw_text"][:500]),
+                        )
+                        destination_id = int(project_cursor.lastrowid)
+                    elif item_type == "content":
+                        content_cursor = db.execute(
+                            "INSERT INTO content_items(title, description, status, source_inbox_id) VALUES (?, ?, 'idea', ?)",
+                            (title[:200], item["raw_text"][:800], inbox_id),
+                        )
+                        destination_id = int(content_cursor.lastrowid)
+                    elif item_type == "note":
+                        note_cursor = db.execute(
+                            "INSERT INTO notes(title, body, source_inbox_id) VALUES (?, ?, ?)",
+                            (title[:200], item["raw_text"][:2000], inbox_id),
+                        )
+                        destination_id = int(note_cursor.lastrowid)
+                    elif item_type == "transaction":
+                        destination_id = int(payload.get("destinationId") or 0)
+                        if not destination_id or not db.execute("SELECT id FROM transactions WHERE id=?", (destination_id,)).fetchone():
+                            raise ValueError("请先补充金额、分类和账户，再确认这条财务记录")
+                    db.execute(
+                        """
+                        UPDATE inbox SET inferred_type=?, status='processed', destination_id=?,
+                            processed_at=? WHERE id=?
+                        """,
+                        (item_type, destination_id, datetime.now().isoformat(timespec="seconds"), inbox_id),
+                    )
+                    self.send_json({"ok": True, "destination": item_type, "destinationId": destination_id})
+                else:
+                    self.send_error_json("接口不存在", HTTPStatus.NOT_FOUND)
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            self.send_error_json(str(exc))
+        except Exception as exc:
+            self.send_error_json(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_PUT(self) -> None:
+        if not self.require_authorized():
+            return
+        path = urlparse(self.path).path
+        if path == "/api/budget":
+            try:
+                payload = read_json(self)
+                month = str(payload.get("month", "")).strip()
+                month_bounds(month)
+                amount = round(float(payload.get("amount", 0)), 2)
+                if amount < 0:
+                    raise ValueError("本月预算不能小于 0")
+                with connect() as db:
+                    db.execute(
+                        """
+                        INSERT INTO monthly_budgets(month, amount) VALUES (?, ?)
+                        ON CONFLICT(month) DO UPDATE SET amount=excluded.amount, updated_at=CURRENT_TIMESTAMP
+                        """,
+                        (month, amount),
+                    )
+                self.send_json({"ok": True})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        if path == "/api/profile":
+            try:
+                payload = read_json(self)
+                display_name = str(payload.get("displayName", "")).strip()
+                workspace_name = str(payload.get("workspaceName", "")).strip()
+                if not display_name:
+                    raise ValueError("昵称不能为空")
+                if not workspace_name:
+                    raise ValueError("工作空间名称不能为空")
+                with connect() as db:
+                    db.executemany(
+                        """
+                        INSERT INTO app_settings(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+                        """,
+                        [("display_name", display_name[:40]), ("workspace_name", workspace_name[:80])],
+                    )
+                self.send_json({"ok": True})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        exercise_match = re.fullmatch(r"/api/exercise/(\d+)", path)
+        if exercise_match:
+            try:
+                payload = read_json(self)
+                exercise = validate_exercise(payload)
+                with connect() as db:
+                    cursor = db.execute(
+                        """
+                        UPDATE exercise_checkins SET exercise_date=?, activity=?, duration_minutes=?, note=?,
+                            updated_at=CURRENT_TIMESTAMP WHERE id=?
+                        """,
+                        (exercise["date"], exercise["activity"], exercise["durationMinutes"], exercise["note"], int(exercise_match.group(1))),
+                    )
+                    if cursor.rowcount == 0:
+                        return self.send_error_json("运动记录不存在", HTTPStatus.NOT_FOUND)
+                self.send_json({"ok": True})
+            except sqlite3.IntegrityError:
+                self.send_error_json("这一天已经有另一条运动打卡")
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        project_match = re.fullmatch(r"/api/projects/(\d+)", path)
+        if project_match:
+            try:
+                payload = read_json(self)
+                with connect() as db:
+                    project = db.execute(
+                        "SELECT id, title, description, status FROM projects WHERE id=?",
+                        (int(project_match.group(1)),),
+                    ).fetchone()
+                    if not project:
+                        return self.send_error_json("项目不存在", HTTPStatus.NOT_FOUND)
+                    title = str(payload.get("title", project["title"])).strip()
+                    description = str(payload.get("description", project["description"])).strip()
+                    status = str(payload.get("status", project["status"])).strip()
+                    if not title:
+                        raise ValueError("项目名称不能为空")
+                    if status not in {"todo", "doing", "review"}:
+                        raise ValueError("项目状态无效")
+                    db.execute(
+                        "UPDATE projects SET title=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (title[:160], description[:500], status, int(project_match.group(1))),
+                    )
+                    self.send_json({"ok": True})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        content_match = re.fullmatch(r"/api/content/(\d+)", path)
+        if content_match:
+            try:
+                payload = read_json(self)
+                with connect() as db:
+                    item = db.execute("SELECT id, title, description, status FROM content_items WHERE id=?", (int(content_match.group(1)),)).fetchone()
+                    if not item:
+                        return self.send_error_json("内容不存在", HTTPStatus.NOT_FOUND)
+                    title = str(payload.get("title", item["title"])).strip()
+                    description = str(payload.get("description", item["description"])).strip()
+                    status = str(payload.get("status", item["status"])).strip()
+                    if not title:
+                        raise ValueError("内容标题不能为空")
+                    if status not in {"idea", "creating", "ready", "published"}:
+                        raise ValueError("内容状态无效")
+                    db.execute(
+                        "UPDATE content_items SET title=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (title[:200], description[:800], status, int(content_match.group(1))),
+                    )
+                    self.send_json({"ok": True})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        task_match = re.fullmatch(r"/api/tasks/(\d+)", path)
+        if task_match:
+            try:
+                payload = read_json(self)
+                with connect() as db:
+                    task = db.execute("SELECT id, title, due_date, completed_at FROM tasks WHERE id=?", (int(task_match.group(1)),)).fetchone()
+                    if not task:
+                        return self.send_error_json("任务不存在", HTTPStatus.NOT_FOUND)
+                    title = str(payload.get("title", task["title"])).strip()
+                    due_date = str(payload.get("dueDate", task["due_date"])).strip()
+                    if not title:
+                        raise ValueError("任务内容不能为空")
+                    date.fromisoformat(due_date)
+                    done = bool(payload.get("done", task["completed_at"] is not None))
+                    completed_at = task["completed_at"]
+                    if done and not completed_at:
+                        completed_at = datetime.now().isoformat(timespec="seconds")
+                    elif not done:
+                        completed_at = None
+                    db.execute(
+                        "UPDATE tasks SET title=?, due_date=?, completed_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (title[:240], due_date, completed_at, int(task_match.group(1))),
+                    )
+                    self.send_json({"ok": True, "completedAt": completed_at})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
+        match = re.fullmatch(r"/api/transactions/(\d+)", path)
+        if not match:
+            return self.send_error_json("接口不存在", HTTPStatus.NOT_FOUND)
+        try:
+            payload = read_json(self)
+            with connect() as db:
+                tx = validate_transaction(payload, db)
+                cursor = db.execute(
+                    """
+                    UPDATE transactions SET kind=?, amount=?, transaction_date=?, category_id=?, account_id=?,
+                        project=?, counterparty=?, note=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+                    """,
+                    (tx["kind"], tx["amount"], tx["date"], tx["categoryId"], tx["accountId"], tx["project"], tx["counterparty"], tx["note"], int(match.group(1))),
+                )
+                if cursor.rowcount == 0:
+                    return self.send_error_json("流水不存在", HTTPStatus.NOT_FOUND)
+                self.send_json({"ok": True})
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            self.send_error_json(str(exc))
+
+    def do_DELETE(self) -> None:
+        if not self.require_authorized():
+            return
+        path = urlparse(self.path).path
+        exercise_match = re.fullmatch(r"/api/exercise/(\d+)", path)
+        if exercise_match:
+            with connect() as db:
+                cursor = db.execute("DELETE FROM exercise_checkins WHERE id=?", (int(exercise_match.group(1)),))
+                if cursor.rowcount == 0:
+                    return self.send_error_json("运动记录不存在", HTTPStatus.NOT_FOUND)
+            return self.send_json({"ok": True})
+
+        project_match = re.fullmatch(r"/api/projects/(\d+)", path)
+        if project_match:
+            with connect() as db:
+                cursor = db.execute("DELETE FROM projects WHERE id=?", (int(project_match.group(1)),))
+                if cursor.rowcount == 0:
+                    return self.send_error_json("项目不存在", HTTPStatus.NOT_FOUND)
+            return self.send_json({"ok": True})
+
+        content_match = re.fullmatch(r"/api/content/(\d+)", path)
+        if content_match:
+            with connect() as db:
+                cursor = db.execute("DELETE FROM content_items WHERE id=?", (int(content_match.group(1)),))
+                if cursor.rowcount == 0:
+                    return self.send_error_json("内容不存在", HTTPStatus.NOT_FOUND)
+            return self.send_json({"ok": True})
+
+        task_match = re.fullmatch(r"/api/tasks/(\d+)", path)
+        if task_match:
+            with connect() as db:
+                cursor = db.execute("DELETE FROM tasks WHERE id=?", (int(task_match.group(1)),))
+                if cursor.rowcount == 0:
+                    return self.send_error_json("任务不存在", HTTPStatus.NOT_FOUND)
+            return self.send_json({"ok": True})
+
+        match = re.fullmatch(r"/api/transactions/(\d+)", path)
+        if not match:
+            return self.send_error_json("接口不存在", HTTPStatus.NOT_FOUND)
+        with connect() as db:
+            cursor = db.execute("DELETE FROM transactions WHERE id=?", (int(match.group(1)),))
+            if cursor.rowcount == 0:
+                return self.send_error_json("流水不存在", HTTPStatus.NOT_FOUND)
+        self.send_json({"ok": True})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run XU Workspace locally")
+    parser.add_argument("--port", type=int, default=4173)
+    parser.add_argument("--host", default="127.0.0.1")
+    args = parser.parse_args()
+    init_database()
+    handler = partial(XUHandler, directory=str(STATIC_ROOT))
+    server = ThreadingHTTPServer((args.host, args.port), handler)
+    actual_port = int(server.server_address[1])
+    lan_enabled = args.host not in {"127.0.0.1", "::1", "localhost"}
+    MOBILE_ACCESS.update({
+        "enabled": lan_enabled,
+        "port": actual_port,
+        "lan_ip": find_lan_ip() if lan_enabled else "",
+        "access_code": f"{secrets.randbelow(1_000_000):06d}",
+        "session_token": secrets.token_urlsafe(32),
+    })
+    server.daemon_threads = True
+    print(f"XU Workspace: http://127.0.0.1:{actual_port}/")
+    print(f"Local database: {DB_PATH}")
+    if MOBILE_ACCESS["enabled"] and MOBILE_ACCESS["lan_ip"]:
+        print(f"Mobile access: http://{MOBILE_ACCESS['lan_ip']}:{actual_port}/")
+        print(f"Mobile code: {MOBILE_ACCESS['access_code']}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+if __name__ == "__main__":
+    main()

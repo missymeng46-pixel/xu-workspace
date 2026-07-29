@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#c9cdd0" />
+    <title>序 XU · 个人工作空间</title>
+    <link rel="stylesheet" href="styles.css?v=cool-20260729-22" />
+    <link rel="stylesheet" href="theme-cool.css?v=cool-20260729-22" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#" aria-label="序 XU 首页">
+          <span class="brand-mark"><i></i><i></i><i></i><i></i></span>
+          <span class="brand-name">序 <small>XU</small></span>
+        </a>
+
+        <nav class="main-nav">
+          <button class="nav-item active" data-view="today">
+            <span class="nav-icon" data-icon="home"></span><span>今日</span>
+          </button>
+          <button class="nav-item" data-view="plan">
+            <span class="nav-icon" data-icon="calendar"></span><span>计划</span>
+          </button>
+          <button class="nav-item" data-view="finance">
+            <span class="nav-icon" data-icon="wallet"></span><span>财务</span>
+          </button>
+          <button class="nav-item" data-view="projects">
+            <span class="nav-icon" data-icon="layers"></span><span>项目</span>
+          </button>
+          <button class="nav-item" data-view="content">
+            <span class="nav-icon" data-icon="pen"></span><span>内容</span>
+          </button>
+          <button class="nav-item" data-view="exercise">
+            <span class="nav-icon" data-icon="exercise"></span><span>运动</span>
+          </button>
+          <button class="nav-item" data-view="inbox">
+            <span class="nav-icon" data-icon="inbox"></span><span>收件箱</span><b id="inboxBadge" hidden>0</b>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <button class="nav-item" data-view="settings">
+            <span class="nav-icon" data-icon="settings"></span><span>设置</span>
+          </button>
+          <div class="profile">
+            <div class="avatar" id="profileAvatar">新</div>
+            <div><strong id="profileName">新朋友</strong><small id="profileWorkspace">我的工作空间</small></div>
+            <button type="button" id="editProfile" aria-label="编辑个人资料">•••</button>
+          </div>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <button class="mobile-brand" aria-label="打开导航">
+            <span class="brand-mark"><i></i><i></i><i></i><i></i></span>
+          </button>
+          <div class="date-block">
+            <span id="eyebrowDate">MON · 27 JUL</span>
+            <p id="greeting">早上好，新朋友</p>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button search-trigger" aria-label="搜索"><span data-icon="search"></span></button>
+            <button class="icon-button notification" aria-label="通知"><span data-icon="bell"></span><i></i></button>
+            <button class="secondary-button phone-access-trigger" id="openPhoneAccess"><span data-icon="phone"></span><b>手机联动</b></button>
+            <button class="primary-button" id="openCapture"><span>＋</span> 快速记录</button>
+          </div>
+        </header>
+
+        <div id="viewRoot" class="view-root" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <nav class="mobile-nav" aria-label="移动端导航">
+      <button class="active" data-view="today"><span data-icon="home"></span><small>今日</small></button>
+      <button data-view="plan"><span data-icon="calendar"></span><small>计划</small></button>
+      <button data-view="finance"><span data-icon="wallet"></span><small>财务</small></button>
+      <button class="mobile-capture" id="mobileCapture" aria-label="快速记录">＋</button>
+      <button data-view="exercise"><span data-icon="exercise"></span><small>运动</small></button>
+      <button data-view="projects"><span data-icon="layers"></span><small>项目</small></button>
+      <button data-view="inbox"><span data-icon="inbox"></span><small>收件箱</small></button>
+    </nav>
+
+    <dialog id="profileDialog" class="profile-dialog">
+      <form id="profileForm">
+        <div class="dialog-head">
+          <div><span class="micro-label">PERSONAL PROFILE</span><h2>编辑个人资料</h2></div>
+          <button type="button" class="close-button" data-close="profileDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="profile-preview">
+          <div class="avatar" id="profilePreviewAvatar">新</div>
+          <div><strong id="profilePreviewName">新朋友</strong><small>顶部问候语会同步更新</small></div>
+        </div>
+        <div class="form-grid profile-form-grid">
+          <label class="field field-wide"><span>你的昵称</span><input id="profileDisplayName" maxlength="40" placeholder="例如：小雨" required /></label>
+          <label class="field field-wide"><span>工作空间名称</span><input id="profileWorkspaceName" maxlength="80" placeholder="例如：我的个人工作空间" required /></label>
+        </div>
+        <div class="dialog-foot"><p><i></i> 修改会保存在这台电脑上</p><button class="primary-button" type="submit">保存资料 <span>→</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="captureDialog" class="capture-dialog">
+      <form method="dialog" id="captureForm">
+        <div class="dialog-head">
+          <div><span class="micro-label">QUICK CAPTURE</span><h2>想到什么，就记什么。</h2></div>
+          <button type="button" class="close-button" data-close="captureDialog" aria-label="关闭">×</button>
+        </div>
+        <label class="capture-input-wrap">
+          <textarea id="captureInput" placeholder="例如：午饭 38 元，支付宝；或下周三提醒我找老王确认报价" required></textarea>
+          <span class="voice-dot" title="语音输入">⌁</span>
+        </label>
+        <div class="capture-suggestions">
+          <button type="button" data-example="收到品牌商单尾款 8,000 元，微信">记一笔收入</button>
+          <button type="button" data-example="明天下午 3 点完成产品方案初稿">创建任务</button>
+          <button type="button" data-example="做一期关于个人工作空间的小红书">记录灵感</button>
+        </div>
+        <div class="dialog-foot">
+          <p><i></i> AI 会自动识别类型、金额、时间和关联项目</p>
+          <button class="primary-button" value="default" type="submit">交给「序」整理 <span>→</span></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="manualInboxDialog" class="task-dialog">
+      <form id="manualInboxForm">
+        <div class="dialog-head">
+          <div><span class="micro-label">MANUAL SORT</span><h2>手动整理收件箱</h2></div>
+          <button type="button" class="close-button" data-close="manualInboxDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="form-grid task-form-grid">
+          <label class="field field-wide"><span>放到哪里？</span><select id="manualInboxType"><option value="task">今日任务</option><option value="project">项目看板</option><option value="content">内容灵感</option><option value="transaction">财务记录</option><option value="note">普通笔记</option></select></label>
+          <label class="field field-wide"><span>整理后的标题</span><input id="manualInboxTitle" maxlength="240" required /></label>
+          <label class="field field-wide"><span>日期</span><input id="manualInboxDate" type="date" required /></label>
+        </div>
+        <div class="dialog-foot"><p><i></i> 不需要 AI，也能完成分类</p><button class="primary-button" type="submit">确认整理 <span>→</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="transactionDialog" class="transaction-dialog">
+      <form id="transactionForm">
+        <input type="hidden" id="transactionId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">MONEY ENTRY</span><h2 id="transactionTitle">记一笔</h2></div>
+          <button type="button" class="close-button" data-close="transactionDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="kind-toggle" role="group" aria-label="收支类型">
+          <label><input type="radio" name="kind" value="expense" checked /><span>支出</span></label>
+          <label><input type="radio" name="kind" value="income" /><span>收入</span></label>
+        </div>
+        <div class="form-grid">
+          <label class="field amount-field"><span>金额</span><div><b>¥</b><input id="transactionAmount" type="number" min="0.01" step="0.01" placeholder="0.00" required /></div></label>
+          <label class="field"><span>日期</span><input id="transactionDate" type="date" required /></label>
+          <label class="field"><span>分类</span><select id="transactionCategory" required></select></label>
+          <label class="field"><span>账户</span><select id="transactionAccount" required></select></label>
+          <label class="field"><span>项目（选填）</span><input id="transactionProject" placeholder="关联项目" /></label>
+          <label class="field"><span>交易对方（选填）</span><input id="transactionCounterparty" placeholder="商家或客户" /></label>
+          <label class="field field-wide"><span>备注</span><input id="transactionNote" placeholder="这笔钱是做什么的？" /></label>
+        </div>
+        <div class="dialog-foot transaction-foot">
+          <button type="button" class="danger-button" id="deleteTransaction" hidden>删除这笔流水</button>
+          <div class="form-actions"><button type="button" class="secondary-button" data-close="transactionDialog">取消</button><button class="primary-button" type="submit">保存流水 <span>→</span></button></div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="importDialog" class="import-dialog">
+      <form id="importForm">
+        <div class="dialog-head">
+          <div><span class="micro-label">CSV IMPORT</span><h2>导入账单</h2></div>
+          <button type="button" class="close-button" data-close="importDialog" aria-label="关闭">×</button>
+        </div>
+        <label class="file-drop" id="fileDrop">
+          <input id="csvFile" type="file" accept=".csv,text/csv" required />
+          <span class="file-art">CSV</span>
+          <strong>选择一个 CSV 文件</strong>
+          <small>数据只会写入你电脑上的本地数据库</small>
+        </label>
+        <div class="csv-format"><span>需要的表头</span><code>日期,类型,金额,分类,账户,项目,对方,备注</code></div>
+        <div class="dialog-foot"><p><i></i> 日期格式示例：2026-07-27；类型填写“收入”或“支出”</p><button class="primary-button" type="submit">开始导入 <span>→</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="deleteDialog" class="confirm-dialog">
+      <div class="confirm-card">
+        <div class="confirm-art">!</div>
+        <span class="micro-label">DELETE ENTRY</span>
+        <h2>要删除这笔流水吗？</h2>
+        <p>删除后金额和统计会立即更新，这个操作无法撤销。</p>
+        <div class="confirm-actions">
+          <button type="button" class="secondary-button" data-close="deleteDialog">先保留</button>
+          <button type="button" class="danger-confirm" id="confirmDeleteTransaction">确认删除</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="taskDialog" class="task-dialog">
+      <form id="taskForm">
+        <input type="hidden" id="taskId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">TODAY'S FOCUS</span><h2 id="taskDialogTitle">添加今日任务</h2></div>
+          <button type="button" class="close-button" data-close="taskDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="form-grid task-form-grid">
+          <label class="field field-wide"><span>要完成什么？</span><input id="taskTitle" placeholder="例如：完成项目方案初稿" maxlength="240" required /></label>
+          <label class="field field-wide"><span>计划日期</span><input id="taskDate" type="date" required /></label>
+        </div>
+        <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteTask" hidden>删除任务</button><div class="form-actions"><button class="primary-button" type="submit">保存任务 <span>→</span></button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="projectDialog" class="project-dialog">
+      <form id="projectForm">
+        <input type="hidden" id="projectId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">PROJECT ENTRY</span><h2 id="projectDialogTitle">添加项目</h2></div>
+          <button type="button" class="close-button" data-close="projectDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="form-grid project-form-grid">
+          <label class="field field-wide"><span>项目名称</span><input id="projectTitle" maxlength="160" placeholder="例如：个人工作台视频" required /></label>
+          <label class="field field-wide"><span>项目说明（选填）</span><textarea id="projectDescription" maxlength="500" placeholder="目标、下一步或交付结果"></textarea></label>
+          <label class="field field-wide"><span>当前阶段</span><select id="projectStatus"><option value="todo">待开始</option><option value="doing">进行中</option><option value="review">待确认</option></select></label>
+        </div>
+        <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteProject" hidden>删除项目</button><div class="form-actions"><button class="primary-button" type="submit">保存项目 <span>→</span></button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="contentDialog" class="content-dialog">
+      <form id="contentForm">
+        <input type="hidden" id="contentId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">CONTENT ENTRY</span><h2 id="contentDialogTitle">添加内容</h2></div>
+          <button type="button" class="close-button" data-close="contentDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="form-grid project-form-grid">
+          <label class="field field-wide"><span>内容标题</span><input id="contentTitle" maxlength="200" placeholder="例如：个人工作台使用分享" required /></label>
+          <label class="field field-wide"><span>内容说明（选填）</span><textarea id="contentDescription" maxlength="800" placeholder="核心观点、素材或下一步"></textarea></label>
+          <label class="field field-wide"><span>当前阶段</span><select id="contentStatus"><option value="idea">灵感池</option><option value="creating">制作中</option><option value="ready">待发布</option><option value="published">已发布</option></select></label>
+        </div>
+        <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteContent" hidden>删除内容</button><div class="form-actions"><button class="primary-button" type="submit">保存内容 <span>→</span></button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="budgetDialog" class="budget-dialog">
+      <form id="budgetForm">
+        <div class="dialog-head">
+          <div><span class="micro-label">MONTHLY BUDGET</span><h2>设置本月预算</h2></div>
+          <button type="button" class="close-button" data-close="budgetDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="budget-dialog-copy">预算会按本月每一笔支出自动递减，收入不会占用预算。</div>
+        <div class="form-grid">
+          <label class="field"><span>月份</span><input id="budgetMonth" type="month" readonly required /></label>
+          <label class="field amount-field"><span>支出预算</span><div><b>¥</b><input id="budgetAmount" type="number" min="0" step="0.01" required /></div></label>
+        </div>
+        <div class="dialog-foot"><p><i></i> 每个月可以设置不同预算</p><button class="primary-button" type="submit">保存预算 <span>→</span></button></div>
+      </form>
+    </dialog>
+
+    <dialog id="exerciseDialog" class="exercise-dialog">
+      <form id="exerciseForm">
+        <input type="hidden" id="exerciseId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">MOVE & CHECK IN</span><h2 id="exerciseDialogTitle">今日运动打卡</h2></div>
+          <button type="button" class="close-button" data-close="exerciseDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="exercise-dialog-hero"><img src="assets/cats/exercise-cat.png" alt="黑猫运动插画" /><p>不用追求满分，今天动过，就值得留下一格。</p></div>
+        <div class="form-grid">
+          <label class="field"><span>运动日期</span><input id="exerciseDate" type="date" required /></label>
+          <label class="field"><span>运动时长（分钟，可选）</span><input id="exerciseDuration" type="number" min="0" max="1440" step="1" placeholder="例如：30" /></label>
+          <label class="field field-wide"><span>今天主要运动了什么？</span><input id="exerciseActivity" maxlength="120" placeholder="例如：快走、瑜伽、力量训练" required /></label>
+          <label class="field field-wide"><span>补充感受（选填）</span><textarea id="exerciseNote" maxlength="500" placeholder="今天的状态、强度或身体感受"></textarea></label>
+        </div>
+        <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteExercise" hidden>删除这次打卡</button><div class="form-actions"><button type="button" class="secondary-button" data-close="exerciseDialog">取消</button><button class="primary-button" type="submit">完成打卡 <span>✓</span></button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="entityDeleteDialog" class="confirm-dialog">
+      <div class="confirm-card">
+        <div class="confirm-art">!</div>
+        <span class="micro-label">DELETE ITEM</span>
+        <h2 id="entityDeleteTitle">要删除吗？</h2>
+        <p id="entityDeleteDescription">删除后无法恢复。</p>
+        <div class="confirm-actions"><button type="button" class="secondary-button" data-close="entityDeleteDialog">先保留</button><button type="button" class="danger-confirm" id="confirmDeleteEntity">确认删除</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="receiptDialog" class="receipt-dialog">
+      <div class="receipt-stage">
+        <div class="receipt-toolbar">
+          <div><span class="micro-label">DAILY RECEIPT</span><strong>今天，也认真生活了。</strong></div>
+          <button type="button" class="close-button" data-close="receiptDialog" aria-label="关闭">×</button>
+        </div>
+        <article id="dailyReceipt" class="receipt-paper" aria-label="每日工作总结小票"></article>
+        <div class="receipt-actions">
+          <button type="button" class="secondary-button" id="printReceipt">打印 / 保存 PDF</button>
+          <button type="button" class="primary-button" id="downloadReceipt">下载 PNG <span>↓</span></button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="mobileAccessDialog" class="mobile-access-dialog">
+      <div class="mobile-access-panel">
+        <div class="dialog-head">
+          <div><span class="micro-label">SAME WI-FI ACCESS</span><h2>用手机打开这个工作台</h2></div>
+          <button type="button" class="close-button" data-close="mobileAccessDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="mobile-access-body">
+          <div class="mobile-qr-wrap"><div id="mobileQrCode" aria-label="手机访问二维码"></div><small>手机和 Mac 需连接同一 Wi-Fi</small></div>
+          <div class="mobile-access-copy">
+            <span class="micro-label">访问地址</span>
+            <div class="copy-row"><input id="mobileAccessUrl" readonly /><button type="button" class="secondary-button" id="copyMobileUrl">复制</button></div>
+            <span class="micro-label">临时访问码</span>
+            <strong id="mobileAccessCode" class="mobile-access-code">--- ---</strong>
+            <p>手机扫码后输入访问码。关闭启动终端后，这个访问码自动失效。</p>
+          </div>
+        </div>
+        <div class="mobile-safety-note"><b>只在信任的 Wi-Fi 中使用</b><span>这是局域网访问，不是公网地址，离开当前 Wi-Fi 后无法打开。</span></div>
+      </div>
+    </dialog>
+
+    <dialog id="mobileLoginDialog" class="mobile-login-dialog">
+      <form id="mobileLoginForm" class="mobile-login-card">
+        <div class="mobile-login-art"><span class="brand-mark"><i></i><i></i><i></i><i></i></span></div>
+        <span class="micro-label">MOBILE ACCESS</span>
+        <h2>手机访问「序」</h2>
+        <p>请输入 Mac 工作台“设置 → 手机访问”中显示的6位访问码。</p>
+        <label class="mobile-code-field"><span>访问码</span><input id="mobileLoginCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000 000" required /></label>
+        <button type="submit" class="primary-button">进入工作台 <span>→</span></button>
+        <small>只有同一 Wi-Fi 下的设备才能访问</small>
+      </form>
+    </dialog>
+
+    <dialog id="searchDialog" class="search-dialog">
+      <form method="dialog">
+        <div class="search-field"><span data-icon="search"></span><input autofocus placeholder="搜索项目、流水、内容或联系人…" /><button value="cancel">ESC</button></div>
+        <p>输入关键词，在整个工作空间中查找。</p>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast"><span>✓</span><p></p></div>
+    <script src="assets/vendor/qrcode.min.js"></script>
+    <script src="app.js?v=cool-20260729-22"></script>
+  </body>
+</html>
