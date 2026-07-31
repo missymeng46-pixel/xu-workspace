@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": ["task", "transaction", "content", "project", "note"]
+    },
+    "title": { "type": "string" },
+    "dueDate": { "type": "string" },
+    "summary": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "transactionKind": { "type": "string", "enum": ["income", "expense", ""] },
+    "amount": { "type": ["number", "null"] },
+    "counterparty": { "type": "string" }
+  },
+  "required": [
+    "type",
+    "title",
+    "dueDate",
+    "summary",
+    "confidence",
+    "transactionKind",
+    "amount",
+    "counterparty"
+  ],
+  "additionalProperties": false
+}

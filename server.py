@@ -13,9 +13,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -44,6 +46,7 @@ MOBILE_ACCESS = {
     "session_token": "",
 }
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+WECHAT_CLASSIFY_LOCK = threading.Lock()
 
 
 def find_lan_ip() -> str:
@@ -408,11 +411,86 @@ confidence: 0 到 1。
         raise RuntimeError("DeepSeek 返回了无法识别的分类结果") from exc
 
 
-def classify_inbox_record(db: sqlite3.Connection, inbox_id: int) -> dict:
+def find_codex_binary() -> str:
+    candidates = [
+        os.environ.get("CODEX_CLI_PATH", "").strip(),
+        shutil.which("codex") or "",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("这台 Mac 没有找到 Codex CLI")
+
+
+def classify_with_codex(raw_text: str) -> dict:
+    codex_binary = find_codex_binary()
+    schema_path = APP_DIR / "codex-wechat-schema.json"
+    if not schema_path.exists():
+        raise RuntimeError("缺少 Codex 微信整理规则文件")
+    today = date.today().isoformat()
+    prompt = f"""你是“序 XU”个人工作台的微信收件助手。今天是 {today}。
+理解用户从微信发来的这条记录，将它整理成结构化结果。只依据原文，不补造事实。
+type 只能是 task、transaction、content、project、note：
+- 有明确行动、提醒、截止时间的内容优先为 task；相对日期换算为 YYYY-MM-DD。
+- 已发生的真实收入或支出为 transaction；没有明确金额时不要猜。
+- 选题、脚本、创作灵感为 content；持续推进的完整事项为 project；其余为 note。
+- title 使用简洁自然的中文；summary 用一句话解释为什么这样整理。
+
+微信原文：{raw_text[:1000]}"""
+    allowed_env_names = {
+        "HOME", "CODEX_HOME", "PATH", "TMPDIR", "LANG", "LC_ALL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    }
+    child_env = {key: value for key, value in os.environ.items() if key in allowed_env_names}
+    with tempfile.TemporaryDirectory(prefix="xu-codex-wechat-") as temp_dir:
+        output_path = Path(temp_dir) / "result.json"
+        command = [
+            codex_binary,
+            "exec",
+            "--ephemeral",
+            "--sandbox", "read-only",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--disable", "plugins",
+            "--disable", "remote_plugin",
+            "--disable", "plugin_sharing",
+            "--disable", "shell_tool",
+            "-c", "mcp_servers={}",
+            "--output-schema", str(schema_path),
+            "--output-last-message", str(output_path),
+            "-C", temp_dir,
+            "-",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=child_env,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Codex 整理超时，请稍后重试") from exc
+        if result.returncode != 0 or not output_path.exists():
+            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "未知错误"
+            raise RuntimeError(f"Codex 整理失败：{detail[:180]}")
+        try:
+            return normalize_classification(json.loads(output_path.read_text(encoding="utf-8")), raw_text)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Codex 返回了无法识别的整理结果") from exc
+
+
+def classify_inbox_record(db: sqlite3.Connection, inbox_id: int, processor: str = "deepseek") -> dict:
     row = db.execute("SELECT id, raw_text FROM inbox WHERE id=?", (inbox_id,)).fetchone()
     if not row:
         raise ValueError("收件箱记录不存在")
-    analysis = classify_with_deepseek(row["raw_text"])
+    analysis = classify_with_codex(row["raw_text"]) if processor == "codex" else classify_with_deepseek(row["raw_text"])
     db.execute(
         "UPDATE inbox SET inferred_type=?, status='review', analysis_json=? WHERE id=?",
         (analysis["type"], json.dumps(analysis, ensure_ascii=False), inbox_id),
@@ -432,6 +510,23 @@ def wechat_allowed_openids() -> set[str]:
     return {item.strip() for item in re.split(r"[,\s]+", raw_value) if item.strip()}
 
 
+def wechat_processor() -> str:
+    processor = os.environ.get("WECHAT_PROCESSOR", "codex").strip().lower()
+    return processor if processor in {"codex", "deepseek", "manual"} else "codex"
+
+
+def wechat_processor_ready(processor: str) -> bool:
+    if processor == "codex":
+        try:
+            find_codex_binary()
+            return True
+        except RuntimeError:
+            return False
+    if processor == "deepseek":
+        return bool(os.environ.get("DEEPSEEK_API_KEY", "").strip())
+    return False
+
+
 def wechat_status_payload(db: sqlite3.Connection) -> dict:
     summary = db.execute(
         "SELECT COUNT(*) AS count, MAX(received_at) AS last_received_at FROM wechat_messages"
@@ -439,17 +534,20 @@ def wechat_status_payload(db: sqlite3.Connection) -> dict:
     return {
         "configured": bool(os.environ.get("WECHAT_TOKEN", "").strip()),
         "autoClassify": env_flag("WECHAT_AUTO_CLASSIFY", True),
+        "processor": wechat_processor(),
+        "codexAvailable": bool(shutil.which("codex") or Path("/Applications/ChatGPT.app/Contents/Resources/codex").exists()),
         "allowedOpenIds": len(wechat_allowed_openids()),
         "receivedCount": int(summary["count"]),
         "lastReceivedAt": summary["last_received_at"],
     }
 
 
-def classify_inbox_async(inbox_id: int) -> None:
+def classify_inbox_async(inbox_id: int, processor: str) -> None:
     def worker() -> None:
         try:
-            with connect() as db:
-                classify_inbox_record(db, inbox_id)
+            # Keep Codex calls sequential so a burst of messages cannot start many paid runs at once.
+            with WECHAT_CLASSIFY_LOCK, connect() as db:
+                classify_inbox_record(db, inbox_id, processor)
         except Exception as exc:
             print(f"微信消息 {inbox_id} 自动分类失败：{exc}")
 
@@ -767,6 +865,7 @@ class XUHandler(SimpleHTTPRequestHandler):
 
         reply = "目前只支持文字消息，请直接发送你想记录的文字。"
         inbox_id = None
+        processor = wechat_processor()
         if message_type == "text" and content:
             allowed = wechat_allowed_openids()
             if allowed and from_user not in allowed:
@@ -795,17 +894,18 @@ class XUHandler(SimpleHTTPRequestHandler):
                             """,
                             (message_id, from_user, message_type, content, inbox_id),
                         )
-                        if env_flag("WECHAT_AUTO_CLASSIFY", True) and os.environ.get("DEEPSEEK_API_KEY", "").strip():
-                            reply = "已收到，正在放进「序」的收件箱并自动分类。"
+                        if env_flag("WECHAT_AUTO_CLASSIFY", True) and wechat_processor_ready(processor):
+                            assistant_name = "Codex" if processor == "codex" else "DeepSeek"
+                            reply = f"已收到，正在交给 {assistant_name} 整理并放进「序」工作台。"
                         else:
                             reply = "已收到，已经放进「序」的收件箱，稍后可手动整理。"
                 if (
                     inbox_id
                     and not existing
                     and env_flag("WECHAT_AUTO_CLASSIFY", True)
-                    and os.environ.get("DEEPSEEK_API_KEY", "").strip()
+                    and wechat_processor_ready(processor)
                 ):
-                    classify_inbox_async(inbox_id)
+                    classify_inbox_async(inbox_id, processor)
 
         response_xml = self.wechat_reply_xml(from_user, to_user, reply)
         self.send_text(response_xml, content_type="application/xml; charset=utf-8")

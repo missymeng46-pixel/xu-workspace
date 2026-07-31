@@ -9,7 +9,7 @@ echo ""
 read -s "wechat_token?请输入公众号 Token："
 echo ""
 read "allowed_openids?请输入允许记录消息的微信 OpenID（多个用逗号分隔）："
-read "auto_answer?收到消息后使用 DeepSeek 自动分类？[Y/n]："
+read "auto_answer?收到消息后交给 Codex 自动整理？[Y/n]："
 
 if [[ -z "$wechat_token" || -z "$allowed_openids" ]]; then
   echo "Token 和 OpenID 都不能为空，配置已取消。"
@@ -32,7 +32,7 @@ trap 'rm -f "$temp_env"' EXIT INT TERM
 if [[ -f "$APP_DIR/.env" ]]; then
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
-      WECHAT_TOKEN=*|WECHAT_ALLOWED_OPENIDS=*|WECHAT_AUTO_CLASSIFY=*) ;;
+      WECHAT_TOKEN=*|WECHAT_ALLOWED_OPENIDS=*|WECHAT_AUTO_CLASSIFY=*|WECHAT_PROCESSOR=*) ;;
       *) print -r -- "$line" >> "$temp_env" ;;
     esac
   done < "$APP_DIR/.env"
@@ -40,7 +40,8 @@ fi
 printf '%s\n' \
   "WECHAT_TOKEN=$wechat_token" \
   "WECHAT_ALLOWED_OPENIDS=$allowed_openids" \
-  "WECHAT_AUTO_CLASSIFY=$auto_classify" >> "$temp_env"
+  "WECHAT_AUTO_CLASSIFY=$auto_classify" \
+  "WECHAT_PROCESSOR=codex" >> "$temp_env"
 mv "$temp_env" "$APP_DIR/.env"
 chmod 600 "$APP_DIR/.env"
 trap - EXIT INT TERM

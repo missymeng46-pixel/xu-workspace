@@ -13,7 +13,7 @@
 - 内容：灵感池、制作中、待发布、已发布
 - 运动：每日打卡、运动内容、时长、连续天数和月历
 - 收件箱：DeepSeek 自动分类或完全离线的手动整理
-- 微信入口：公众号文字消息进入收件箱，可选后台自动分类
+- 微信入口：公众号文字消息进入收件箱，可由本机 Codex 后台理解整理
 - 手机联动：同一 Wi-Fi 下通过临时访问码访问同一份数据
 - 本地优先：单用户 SQLite，无云端账号依赖
 
@@ -82,9 +82,11 @@ DEEPSEEK_MODEL=deepseek-chat
 3. 双击 `配置微信接入.command`，填写同一个 Token 和允许写入的 OpenID。
 4. 重新启动工作台，再双击 `启动微信中转.command`。
 5. 在中转终端复制 `https://...trycloudflare.com` 地址；把 `https://...trycloudflare.com/api/wechat/callback` 填入测试号接口 URL，选择明文模式并提交。
-6. 给测试号发送文字，消息会进入工作台收件箱；若已配置 DeepSeek，可在后台自动分类。
+6. 给测试号发送文字，消息会进入工作台收件箱，再由本机 Codex 后台理解为任务、财务、内容、项目或笔记。
 
-安全机制包括微信 SHA-1 签名校验、OpenID 白名单、消息 ID 去重和 1000 字长度限制。Cloudflare Quick Tunnel 地址每次启动可能变化，仅适合个人测试；长期运行请使用固定域名和持久 Tunnel。
+这不是把微信接进某个正在打开的 Codex 对话，而是每条微信文字触发一次独立的 `codex exec` 临时任务。使用前需要本机安装并登录 Codex CLI。Codex 在只读空目录中运行，插件、MCP 和 Shell 工具均关闭，只能返回符合 `codex-wechat-schema.json` 的整理结果。
+
+安全机制还包括微信 SHA-1 签名校验、OpenID 白名单、消息 ID 去重、1000 字长度限制和 Codex 串行调用。Cloudflare Quick Tunnel 地址每次启动可能变化，仅适合个人测试；长期运行请使用固定域名和持久 Tunnel。
 
 ## 数据与隐私
 
