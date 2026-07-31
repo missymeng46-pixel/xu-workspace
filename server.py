@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import hmac
 import ipaddress
 import io
@@ -15,7 +16,9 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 from functools import partial
 from http import HTTPStatus
@@ -23,7 +26,7 @@ from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -165,6 +168,16 @@ def init_database() -> None:
                 inferred_type TEXT NOT NULL DEFAULT 'note',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS wechat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL UNIQUE,
+                open_id TEXT NOT NULL,
+                message_type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                inbox_id INTEGER REFERENCES inbox(id),
+                received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS tasks (
@@ -407,6 +420,42 @@ def classify_inbox_record(db: sqlite3.Connection, inbox_id: int) -> dict:
     return analysis
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def wechat_allowed_openids() -> set[str]:
+    raw_value = os.environ.get("WECHAT_ALLOWED_OPENIDS", "")
+    return {item.strip() for item in re.split(r"[,\s]+", raw_value) if item.strip()}
+
+
+def wechat_status_payload(db: sqlite3.Connection) -> dict:
+    summary = db.execute(
+        "SELECT COUNT(*) AS count, MAX(received_at) AS last_received_at FROM wechat_messages"
+    ).fetchone()
+    return {
+        "configured": bool(os.environ.get("WECHAT_TOKEN", "").strip()),
+        "autoClassify": env_flag("WECHAT_AUTO_CLASSIFY", True),
+        "allowedOpenIds": len(wechat_allowed_openids()),
+        "receivedCount": int(summary["count"]),
+        "lastReceivedAt": summary["last_received_at"],
+    }
+
+
+def classify_inbox_async(inbox_id: int) -> None:
+    def worker() -> None:
+        try:
+            with connect() as db:
+                classify_inbox_record(db, inbox_id)
+        except Exception as exc:
+            print(f"微信消息 {inbox_id} 自动分类失败：{exc}")
+
+    threading.Thread(target=worker, daemon=True, name=f"wechat-classify-{inbox_id}").start()
+
+
 def month_bounds(month: str | None = None) -> tuple[str, str, str]:
     month = month or date.today().strftime("%Y-%m")
     start = date.fromisoformat(f"{month}-01")
@@ -647,6 +696,120 @@ class XUHandler(SimpleHTTPRequestHandler):
             payload["code"] = code
         self.send_json(payload, status)
 
+    def send_text(
+        self,
+        content: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        content_type: str = "text/plain; charset=utf-8",
+    ) -> None:
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def verify_wechat_signature(self, parsed) -> bool:
+        token = os.environ.get("WECHAT_TOKEN", "").strip()
+        if not token:
+            return False
+        query = parse_qs(parsed.query)
+        signature = query.get("signature", [""])[0]
+        timestamp = query.get("timestamp", [""])[0]
+        nonce = query.get("nonce", [""])[0]
+        if not signature or not timestamp or not nonce:
+            return False
+        digest = hashlib.sha1("".join(sorted([token, timestamp, nonce])).encode("utf-8")).hexdigest()
+        return hmac.compare_digest(digest, signature)
+
+    def handle_wechat_verification(self, parsed) -> None:
+        if not os.environ.get("WECHAT_TOKEN", "").strip():
+            return self.send_text("微信接入尚未配置", HTTPStatus.SERVICE_UNAVAILABLE)
+        if not self.verify_wechat_signature(parsed):
+            return self.send_text("签名验证失败", HTTPStatus.FORBIDDEN)
+        echo = parse_qs(parsed.query).get("echostr", [""])[0]
+        self.send_text(echo)
+
+    def wechat_reply_xml(self, to_user: str, from_user: str, content: str) -> str:
+        root = ET.Element("xml")
+        ET.SubElement(root, "ToUserName").text = to_user
+        ET.SubElement(root, "FromUserName").text = from_user
+        ET.SubElement(root, "CreateTime").text = str(int(time.time()))
+        ET.SubElement(root, "MsgType").text = "text"
+        ET.SubElement(root, "Content").text = content
+        return ET.tostring(root, encoding="unicode", short_empty_elements=False)
+
+    def handle_wechat_callback(self, parsed) -> None:
+        if not os.environ.get("WECHAT_TOKEN", "").strip():
+            return self.send_text("微信接入尚未配置", HTTPStatus.SERVICE_UNAVAILABLE)
+        if not self.verify_wechat_signature(parsed):
+            return self.send_text("签名验证失败", HTTPStatus.FORBIDDEN)
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self.send_text("无效请求", HTTPStatus.BAD_REQUEST)
+        if size <= 0 or size > 65536:
+            return self.send_text("消息大小无效", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        try:
+            root = ET.fromstring(self.rfile.read(size))
+        except ET.ParseError:
+            return self.send_text("XML 格式无效", HTTPStatus.BAD_REQUEST)
+
+        to_user = (root.findtext("ToUserName") or "").strip()
+        from_user = (root.findtext("FromUserName") or "").strip()
+        message_type = (root.findtext("MsgType") or "").strip().lower()
+        content = (root.findtext("Content") or "").strip()[:1000]
+        if root.find("Encrypt") is not None:
+            return self.send_text("当前仅支持公众号明文模式", HTTPStatus.BAD_REQUEST)
+        if not to_user or not from_user:
+            return self.send_text("消息字段不完整", HTTPStatus.BAD_REQUEST)
+
+        reply = "目前只支持文字消息，请直接发送你想记录的文字。"
+        inbox_id = None
+        if message_type == "text" and content:
+            allowed = wechat_allowed_openids()
+            if allowed and from_user not in allowed:
+                reply = "这个微信尚未获得工作台记录权限。"
+            else:
+                create_time = (root.findtext("CreateTime") or "").strip()
+                message_id = (root.findtext("MsgId") or "").strip()
+                if not message_id:
+                    source = f"{from_user}|{create_time}|{content}"
+                    message_id = "fallback-" + hashlib.sha256(source.encode("utf-8")).hexdigest()
+                with connect() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    existing = db.execute(
+                        "SELECT inbox_id FROM wechat_messages WHERE message_id=?", (message_id,)
+                    ).fetchone()
+                    if existing:
+                        inbox_id = existing["inbox_id"]
+                        reply = "这条消息已经收到，不会重复记录。"
+                    else:
+                        cursor = db.execute("INSERT INTO inbox(raw_text) VALUES (?)", (content,))
+                        inbox_id = int(cursor.lastrowid)
+                        db.execute(
+                            """
+                            INSERT INTO wechat_messages(message_id, open_id, message_type, content, inbox_id)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (message_id, from_user, message_type, content, inbox_id),
+                        )
+                        if env_flag("WECHAT_AUTO_CLASSIFY", True) and os.environ.get("DEEPSEEK_API_KEY", "").strip():
+                            reply = "已收到，正在放进「序」的收件箱并自动分类。"
+                        else:
+                            reply = "已收到，已经放进「序」的收件箱，稍后可手动整理。"
+                if (
+                    inbox_id
+                    and not existing
+                    and env_flag("WECHAT_AUTO_CLASSIFY", True)
+                    and os.environ.get("DEEPSEEK_API_KEY", "").strip()
+                ):
+                    classify_inbox_async(inbox_id)
+
+        response_xml = self.wechat_reply_xml(from_user, to_user, reply)
+        self.send_text(response_xml, content_type="application/xml; charset=utf-8")
+
     def handle_mobile_login(self, payload: dict) -> None:
         client_ip = self.client_address[0]
         now = time.monotonic()
@@ -668,6 +831,8 @@ class XUHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/wechat/callback":
+            return self.handle_wechat_verification(parsed)
         if not parsed.path.startswith("/api/"):
             if parsed.path in {"/xu-workspace", "/xu-workspace/"}:
                 self.send_response(HTTPStatus.FOUND)
@@ -713,6 +878,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                             "displayName": settings.get("display_name", "新朋友"),
                             "workspaceName": settings.get("workspace_name", "我的工作空间"),
                         },
+                        "wechatStatus": wechat_status_payload(db),
                         "client": {"local": self.is_local_client()},
                     })
                 else:
@@ -722,6 +888,12 @@ class XUHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/wechat/callback":
+            try:
+                return self.handle_wechat_callback(parsed)
+            except Exception as exc:
+                print(f"微信回调处理失败：{exc}")
+                return self.send_text("消息处理失败", HTTPStatus.INTERNAL_SERVER_ERROR)
         try:
             payload = read_json(self)
             if parsed.path == "/api/mobile-login":

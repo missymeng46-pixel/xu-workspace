@@ -15,10 +15,23 @@ if [[ -z "$api_key" ]]; then
 fi
 
 umask 077
+temp_env="$(mktemp "$APP_DIR/.env.tmp.XXXXXX")"
+trap 'rm -f "$temp_env"' EXIT INT TERM
+if [[ -f "$APP_DIR/.env" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      DEEPSEEK_API_KEY=*|DEEPSEEK_BASE_URL=*|DEEPSEEK_MODEL=*) ;;
+      *) print -r -- "$line" >> "$temp_env" ;;
+    esac
+  done < "$APP_DIR/.env"
+fi
 printf '%s\n' \
   "DEEPSEEK_API_KEY=$api_key" \
   "DEEPSEEK_BASE_URL=https://api.deepseek.com" \
-  "DEEPSEEK_MODEL=deepseek-chat" > "$APP_DIR/.env"
+  "DEEPSEEK_MODEL=deepseek-chat" >> "$temp_env"
+mv "$temp_env" "$APP_DIR/.env"
+chmod 600 "$APP_DIR/.env"
+trap - EXIT INT TERM
 
 unset api_key
 echo "配置完成。请关闭已经运行的工作台，再双击“启动序.command”。"

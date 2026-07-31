@@ -29,6 +29,13 @@ const state = {
   contentItems: [],
   exerciseCheckins: [],
   notes: [],
+  wechatStatus: {
+    configured: false,
+    autoClassify: true,
+    allowedOpenIds: 0,
+    receivedCount: 0,
+    lastReceivedAt: null,
+  },
   profile: {
     displayName: "新朋友",
     workspaceName: "我的工作空间",
@@ -76,7 +83,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     const payload = await api("/api/bootstrap");
     const signature = JSON.stringify([
       payload.summary, payload.transactions, payload.inbox, payload.tasks, payload.projects,
-      payload.contentItems, payload.exerciseCheckins, payload.notes, payload.profile,
+      payload.contentItems, payload.exerciseCheckins, payload.notes, payload.profile, payload.wechatStatus,
     ]);
     const dataChanged = signature !== state.dataSignature;
     state.dataSignature = signature;
@@ -90,6 +97,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     state.contentItems = payload.contentItems || [];
     state.exerciseCheckins = payload.exerciseCheckins || [];
     state.notes = payload.notes || [];
+    state.wechatStatus = payload.wechatStatus || state.wechatStatus;
     state.profile = payload.profile || state.profile;
     state.clientLocal = payload.client?.local !== false;
     document.querySelector("#openPhoneAccess").hidden = !state.clientLocal;
@@ -339,8 +347,17 @@ const views = {
   settings: () => `
     <div class="page-heading"><div><span class="micro-label">SYSTEM · 08</span><h1>按照你的方式<span class="accent-word">运转</span></h1></div><p>所有数据默认留在本地。自动化可以建议，但重要操作永远由你确认。</p></div>
     <div class="metric-row"><div class="metric"><span>数据位置</span><strong style="font-size:20px">本地 SQLite</strong><small>${state.apiReady ? "连接正常 · 持久保存" : "等待连接"}</small></div><div class="metric"><span>账户数量</span><strong>${state.accounts.length}</strong><small>${state.accounts.map(account => escapeHtml(account.name)).join(" · ")}</small></div><div class="metric"><span>真实流水</span><strong>${state.transactions.length}</strong><small>支持新增、编辑、删除和导入</small></div></div>
-    <article class="card section-card mobile-access-card"><div><span class="micro-label">PHONE COMPANION</span><h3>${state.clientLocal ? "同一 Wi-Fi 手机访问" : "正在通过手机访问"}</h3><p>${state.clientLocal ? "用手机扫码，就能添加任务、记录财务和运动打卡。手机与电脑共用同一份数据，打开页面时约 8 秒自动同步。Mac 需保持开机和运行。" : "当前数据仍保存在 Mac 上，手机和电脑页面会自动检查更新。关闭 Mac 的启动终端后，手机访问会同步结束。"}</p></div>${state.clientLocal ? '<button class="primary-button" id="openMobileAccess">显示二维码和访问码 <span>→</span></button>' : '<span class="mobile-connected-badge">已安全连接 · 自动同步</span>'}</article>`,
+    <div class="settings-connectors">
+      <article class="card section-card mobile-access-card"><div><span class="micro-label">PHONE COMPANION</span><h3>${state.clientLocal ? "同一 Wi-Fi 手机访问" : "正在通过手机访问"}</h3><p>${state.clientLocal ? "用手机扫码，就能添加任务、记录财务和运动打卡。手机与电脑共用同一份数据，打开页面时约 8 秒自动同步。Mac 需保持开机和运行。" : "当前数据仍保存在 Mac 上，手机和电脑页面会自动检查更新。关闭 Mac 的启动终端后，手机访问会同步结束。"}</p></div>${state.clientLocal ? '<button class="primary-button" id="openMobileAccess">显示二维码和访问码 <span>→</span></button>' : '<span class="mobile-connected-badge">已安全连接 · 自动同步</span>'}</article>
+      <article class="card section-card wechat-access-card"><div><span class="micro-label">WECHAT INBOX</span><h3>微信消息入口</h3><p>${state.wechatStatus.configured ? `公众号发来的文字会进入收件箱。已接收 ${state.wechatStatus.receivedCount} 条${state.wechatStatus.lastReceivedAt ? `，最近一次 ${formatDateTime(state.wechatStatus.lastReceivedAt)}` : ""}。` : "通过微信公众号测试号，把微信里的文字送进工作台收件箱。双击“配置微信接入.command”即可开始配置。"}</p><small>${state.wechatStatus.configured ? `${state.wechatStatus.autoClassify ? "DeepSeek 自动分类已开启" : "当前使用手动整理"} · ${state.wechatStatus.allowedOpenIds ? `已限制 ${state.wechatStatus.allowedOpenIds} 个微信` : "建议设置微信白名单"}` : "需要公众号测试号和 Cloudflare HTTPS 中转"}</small></div><span class="connector-status ${state.wechatStatus.configured ? "connected" : ""}">${state.wechatStatus.configured ? "已配置" : "等待配置"}</span></article>
+    </div>`,
 };
+
+function formatDateTime(value) {
+  const parsed = new Date(`${String(value).replace(" ", "T")}Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(parsed);
+}
 
 function renderTasks() {
   return todayTasks().map(task => `<div class="task-row ${task.completedAt ? "done" : ""}" data-task="${task.id}"><button class="task-check" aria-label="${task.completedAt ? "恢复" : "完成"}任务">✓</button><span class="task-copy">${escapeHtml(task.title)}</span><span class="task-time">${task.completedAt ? formatClock(task.completedAt) : "待完成"}</span><button class="task-edit" data-edit-task="${task.id}" aria-label="编辑任务">•••</button></div>`).join("");

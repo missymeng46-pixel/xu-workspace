@@ -13,6 +13,7 @@
 - 内容：灵感池、制作中、待发布、已发布
 - 运动：每日打卡、运动内容、时长、连续天数和月历
 - 收件箱：DeepSeek 自动分类或完全离线的手动整理
+- 微信入口：公众号文字消息进入收件箱，可选后台自动分类
 - 手机联动：同一 Wi-Fi 下通过临时访问码访问同一份数据
 - 本地优先：单用户 SQLite，无云端账号依赖
 
@@ -72,10 +73,24 @@ DEEPSEEK_MODEL=deepseek-chat
 
 如果使用 Shadowrocket、Clash 等 VPN/代理，请开启“允许局域网”或让 `192.168.0.0/16` 走 `DIRECT`。公共 Wi-Fi、访客 Wi-Fi和开启客户端隔离的路由器可能无法使用局域网访问。
 
+## 可选：接入微信消息
+
+此功能使用微信官方公众号回调，不读取个人微信聊天，也不依赖非官方微信 Hook。
+
+1. 登录[微信公众平台测试号](https://mp.weixin.qq.com/debug/cgi-bin/sandbox?t=sandbox/login)，关注测试号并取得自己的 OpenID。
+2. 在接口配置信息中自定义一个 Token。
+3. 双击 `配置微信接入.command`，填写同一个 Token 和允许写入的 OpenID。
+4. 重新启动工作台，再双击 `启动微信中转.command`。
+5. 在中转终端复制 `https://...trycloudflare.com` 地址；把 `https://...trycloudflare.com/api/wechat/callback` 填入测试号接口 URL，选择明文模式并提交。
+6. 给测试号发送文字，消息会进入工作台收件箱；若已配置 DeepSeek，可在后台自动分类。
+
+安全机制包括微信 SHA-1 签名校验、OpenID 白名单、消息 ID 去重和 1000 字长度限制。Cloudflare Quick Tunnel 地址每次启动可能变化，仅适合个人测试；长期运行请使用固定域名和持久 Tunnel。
+
 ## 数据与隐私
 
 - 工作数据：`data/xu.sqlite3`
 - DeepSeek 配置：`.env`
+- 微信 Token 与 OpenID 白名单：`.env`
 - 数据不会由本项目自动上传到第三方
 - 只有使用 AI 分类时，当前收件箱文本才会发送到你配置的 DeepSeek 接口
 - 手机访问使用每次启动生成的临时访问码和会话 Cookie
@@ -110,4 +125,3 @@ DEEPSEEK_MODEL=deepseek-chat
 ## 许可证
 
 代码采用 [MIT License](LICENSE)。插画和第三方资源的许可范围请查看 [ASSETS.md](ASSETS.md) 及 `assets/vendor` 中的许可证文件。
-
