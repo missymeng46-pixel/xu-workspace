@@ -19,6 +19,9 @@ const state = {
     budget: 15000,
     budgetRemaining: 15000,
     breakdown: [],
+    allocatedBudget: 0,
+    unallocatedBudget: 15000,
+    categoryBudgets: [],
   },
   transactions: [],
   accounts: [],
@@ -49,6 +52,7 @@ const state = {
   clientLocal: true,
   dataSignature: "",
   remoteSyncing: false,
+  expandedTransactionGroups: new Set(),
 };
 
 const icons = {
@@ -315,10 +319,11 @@ const views = {
   finance: () => `
     <div class="page-heading"><div><span class="micro-label">MONEY DESK · 03</span><h1>看清每一笔钱的<span class="accent-word">去向</span></h1></div><p>不只记账，更要知道什么在赚钱，什么正在消耗你的自由。</p></div>
     <div class="metric-row finance-metrics"><div class="metric"><span>本月收入</span><strong>${formatMoney(state.summary.income)}</strong><small>收入支持随时手动添加</small></div><div class="metric"><span>本月支出</span><strong>${formatMoney(state.summary.expense)}</strong><small>预算使用 · ${budgetPercent()}%</small></div><div class="metric"><span>本月预算</span><strong>${formatMoney(state.summary.budget)}</strong><small>点击下方按钮可修改</small></div><div class="metric ${budgetRemaining() < 0 ? "metric-over" : ""}"><span>${budgetRemaining() >= 0 ? "预算剩余" : "预算超出"}</span><strong>${formatMoney(Math.abs(budgetRemaining()))}</strong><small>会随每日支出自动递减</small></div></div>
-    <div class="section-layout">
-      <article class="card section-card"><div class="mini-card-head"><div><span class="micro-label">RECENT FLOW</span><h3>最近流水</h3></div><div class="button-group"><button class="secondary-button" id="importTransactions">导入 CSV</button><button class="income-button" id="addIncome">＋ 记收入</button><button class="primary-button" id="addExpense">＋ 记支出</button></div></div><div class="transaction-list">${renderTransactions()}</div></article>
+    <div class="section-layout finance-layout">
+      <article class="card section-card"><div class="mini-card-head"><div><span class="micro-label">GROUPED FLOW</span><h3>分类流水</h3><p class="section-hint">先看每类总额，点击分类展开具体支出。</p></div><div class="button-group"><button class="secondary-button" id="importTransactions">导入 CSV</button><button class="income-button" id="addIncome">＋ 记收入</button><button class="primary-button" id="addExpense">＋ 记支出</button></div></div><div class="transaction-list transaction-groups">${renderTransactions()}</div></article>
       <article class="card section-card"><div class="mini-card-head"><div><span class="micro-label">MONTHLY BUDGET</span><h3>本月预算与支出构成</h3></div><button class="secondary-button" id="editBudget">修改预算</button></div><div class="budget-overview"><div><span>本月预算</span><strong>${formatMoney(state.summary.budget)}</strong></div><div><span>${budgetRemaining() >= 0 ? "还能支出" : "已经超出"}</span><strong>${formatMoney(Math.abs(budgetRemaining()))}</strong></div></div><div class="budget-bar budget-bar-large"><i style="width:${budgetPercent()}%"></i></div>${renderBreakdown()}</article>
-    </div>`,
+    </div>
+    <article class="card section-card category-budget-card"><div class="mini-card-head"><div><span class="micro-label">CATEGORY ENVELOPES</span><h3>分类预算</h3><p class="section-hint">饮食、工作和其他必要开支各有自己的额度，流水会自动扣减。</p></div><button class="secondary-button" id="editCategoryBudget">设置分类预算</button></div>${renderCategoryBudgets()}</article>`,
 
   projects: () => `
     <div class="page-heading"><div><span class="micro-label">PROJECT ROOM · 04</span><h1>让项目持续<span class="accent-word">向前</span></h1></div><div class="page-heading-tools"><p>进度、投入和回报放在一起，避免用忙碌掩盖真正的停滞。</p><button class="primary-button" id="addProject">＋ 添加项目</button></div></div>
@@ -389,13 +394,53 @@ function transactionLabel(transaction) {
 
 function renderTransactions() {
   if (!state.transactions.length) return '<div class="empty-state">还没有流水，点击“记一笔”开始。</div>';
-  return state.transactions.slice(0, 20).map(transaction => `
+  const groups = new Map();
+  state.transactions.forEach(transaction => {
+    const key = `${transaction.kind}-${transaction.categoryId}`;
+    if (!groups.has(key)) groups.set(key, { key, kind: transaction.kind, name: transaction.category, color: transaction.color, total: 0, items: [] });
+    const group = groups.get(key);
+    group.total += Number(transaction.amount);
+    group.items.push(transaction);
+  });
+  return [...groups.values()].map(group => {
+    const expanded = state.expandedTransactionGroups.has(group.key);
+    const newest = group.items[0]?.date?.slice(5) || "";
+    const rows = group.items.map(transaction => `
     <div class="transaction">
       <span class="transaction-icon" style="background:${transaction.color}20">${transaction.kind === "income" ? "↙" : "↗"}</span>
       <div><strong>${escapeHtml(transactionLabel(transaction))}</strong><small>${escapeHtml(transaction.category)} · ${escapeHtml(transaction.account)} · ${transaction.date.slice(5)}</small></div>
       <span class="transaction-amount ${transaction.kind === "income" ? "positive" : ""}">${transaction.kind === "income" ? "+ " : "- "}${formatMoney(transaction.amount)}</span>
       <button class="transaction-action" data-edit-transaction="${transaction.id}" aria-label="编辑 ${escapeHtml(transactionLabel(transaction))}">•••</button>
     </div>`).join("");
+    return `<section class="transaction-group ${expanded ? "expanded" : ""}">
+      <button class="transaction-group-head" type="button" data-transaction-group="${group.key}" aria-expanded="${expanded}">
+        <span class="transaction-group-icon" style="--group-color:${group.color}">${group.kind === "income" ? "↙" : "↗"}</span>
+        <span class="transaction-group-copy"><strong>${escapeHtml(group.name)}</strong><small>${group.items.length} 笔 · 最近 ${newest}</small></span>
+        <span class="transaction-group-total ${group.kind === "income" ? "positive" : ""}">${group.kind === "income" ? "+ " : "- "}${formatMoney(group.total)}</span>
+        <span class="transaction-group-chevron">⌄</span>
+      </button>
+      <div class="transaction-group-details">${rows}</div>
+    </section>`;
+  }).join("");
+}
+
+function renderCategoryBudgets() {
+  const items = state.summary.categoryBudgets || [];
+  if (!items.length) return '<div class="empty-state">还没有可用的支出分类。</div>';
+  return `<div class="category-budget-summary"><span>已分配 <b>${formatMoney(state.summary.allocatedBudget)}</b></span><span class="${state.summary.unallocatedBudget < 0 ? "over" : ""}">${state.summary.unallocatedBudget >= 0 ? "尚未分配" : "超出总预算"} <b>${formatMoney(Math.abs(state.summary.unallocatedBudget))}</b></span></div>
+    <div class="category-budget-grid">${items.map(item => {
+      const remaining = item.remaining;
+      const isOver = item.configured && remaining < 0;
+      return `<article class="category-budget-item ${isOver ? "over" : ""}">
+        <div class="category-budget-head"><span><i style="background:${item.color}"></i>${escapeHtml(item.name)}</span><strong>${item.configured ? formatMoney(item.budget) : "待设置"}</strong></div>
+        <div class="budget-bar"><i style="width:${item.percent || 0}%;background:${item.color}"></i></div>
+        <div class="category-budget-foot"><span>已支出 ${formatMoney(item.spent)}</span><span>${item.configured ? `${remaining >= 0 ? "剩余" : "超出"} ${formatMoney(Math.abs(remaining))}` : "点击设置预算"}</span></div>
+      </article>`;
+    }).join("")}</div>`;
+}
+
+function renderCategoryBudgetInputs() {
+  return (state.summary.categoryBudgets || []).map(item => `<label class="category-budget-input"><span><i style="background:${item.color}"></i>${escapeHtml(item.name)}</span><div><b>¥</b><input type="number" min="0" step="0.01" placeholder="暂不设置" data-category-budget="${item.categoryId}" value="${item.configured ? item.budget : ""}" /></div></label>`).join("");
 }
 
 function renderBreakdown() {
@@ -567,6 +612,13 @@ function bindViewEvents() {
   document.querySelector("#addIncome")?.addEventListener("click", () => openTransaction(null, null, "income"));
   document.querySelector("#addExpense")?.addEventListener("click", () => openTransaction(null, null, "expense"));
   document.querySelector("#editBudget")?.addEventListener("click", openBudget);
+  document.querySelector("#editCategoryBudget")?.addEventListener("click", openBudget);
+  document.querySelectorAll("[data-transaction-group]").forEach(button => button.addEventListener("click", () => {
+    const key = button.dataset.transactionGroup;
+    if (state.expandedTransactionGroups.has(key)) state.expandedTransactionGroups.delete(key);
+    else state.expandedTransactionGroups.add(key);
+    render("finance", { syncHistory: false });
+  }));
   document.querySelector("#addExercise")?.addEventListener("click", () => openExercise());
   document.querySelectorAll("[data-edit-exercise]").forEach(button => button.addEventListener("click", () => openExercise(Number(button.dataset.editExercise))));
   document.querySelectorAll("[data-exercise-date]").forEach(button => button.addEventListener("click", () => {
@@ -667,6 +719,7 @@ function openBudget() {
   if (!state.apiReady) return showToast("请先启动本地数据服务", true);
   document.querySelector("#budgetMonth").value = state.summary.month || todayIso.slice(0, 7);
   document.querySelector("#budgetAmount").value = state.summary.budget;
+  document.querySelector("#categoryBudgetFields").innerHTML = renderCategoryBudgetInputs();
   document.querySelector("#budgetDialog").showModal();
   setTimeout(() => document.querySelector("#budgetAmount").select(), 60);
 }
@@ -953,11 +1006,15 @@ document.querySelector("#budgetForm").addEventListener("submit", async event => 
   event.preventDefault();
   const month = document.querySelector("#budgetMonth").value;
   const amount = Number(document.querySelector("#budgetAmount").value);
+  const categoryBudgets = [...document.querySelectorAll("[data-category-budget]")].map(input => ({
+    categoryId: Number(input.dataset.categoryBudget),
+    amount: input.value === "" ? null : Number(input.value),
+  }));
   try {
-    await api("/api/budget", { method: "PUT", body: JSON.stringify({ month, amount }) });
+    await api("/api/budget", { method: "PUT", body: JSON.stringify({ month, amount, categoryBudgets }) });
     document.querySelector("#budgetDialog").close();
     await loadData({ quiet: true });
-    showToast("本月预算已保存，剩余额度已重新计算");
+    showToast("总预算和分类预算已保存，剩余额度已重新计算");
   } catch (error) {
     showToast(error.message, true);
   }

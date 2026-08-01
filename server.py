@@ -239,6 +239,11 @@ def init_database() -> None:
             db.execute("ALTER TABLE inbox ADD COLUMN destination_id INTEGER")
         if db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0:
             seed_database(db)
+        expense_names = {row["name"] for row in db.execute("SELECT name FROM categories WHERE kind='expense'")}
+        if not expense_names.intersection({"饮食", "餐饮"}):
+            db.execute("INSERT INTO categories(name, kind, color) VALUES ('饮食', 'expense', '#d7a65a')")
+        if not expense_names.intersection({"工作必要开支", "项目成本", "工作支出"}):
+            db.execute("INSERT INTO categories(name, kind, color) VALUES ('工作必要开支', 'expense', '#759bb2')")
         orphaned_projects = db.execute(
             """
             SELECT id, raw_text, analysis_json FROM inbox
@@ -594,6 +599,39 @@ def finance_payload(db: sqlite3.Connection, month: str | None = None) -> dict:
     ]
     budget_row = db.execute("SELECT amount FROM monthly_budgets WHERE month=?", (month,)).fetchone()
     budget = round(float(budget_row["amount"]), 2) if budget_row else 15000
+    category_budgets = []
+    for row in db.execute(
+        """
+        SELECT c.id, c.name, c.color, b.limit_amount,
+               COALESCE(SUM(t.amount), 0) AS spent
+        FROM categories c
+        LEFT JOIN budgets b ON b.category_id=c.id AND b.month=?
+        LEFT JOIN transactions t ON t.category_id=c.id AND t.kind='expense'
+             AND t.transaction_date >= ? AND t.transaction_date < ?
+        WHERE c.kind='expense'
+        GROUP BY c.id, c.name, c.color, b.limit_amount
+        ORDER BY CASE
+            WHEN c.name IN ('饮食', '餐饮') THEN 0
+            WHEN c.name IN ('工作必要开支', '项目成本', '工作支出') THEN 1
+            ELSE 2 END, c.id
+        """,
+        (month, start, end),
+    ):
+        limit_amount = None if row["limit_amount"] is None else round(float(row["limit_amount"]), 2)
+        spent = round(float(row["spent"]), 2)
+        remaining = None if limit_amount is None else round(limit_amount - spent, 2)
+        percent = 0 if not limit_amount else min(100, round((spent / limit_amount) * 100))
+        category_budgets.append({
+            "categoryId": row["id"],
+            "name": row["name"],
+            "color": row["color"],
+            "budget": limit_amount,
+            "spent": spent,
+            "remaining": remaining,
+            "percent": percent,
+            "configured": limit_amount is not None,
+        })
+    allocated_budget = round(sum(item["budget"] or 0 for item in category_budgets), 2)
     return {
         "month": month,
         "income": round(totals["income"], 2),
@@ -603,6 +641,9 @@ def finance_payload(db: sqlite3.Connection, month: str | None = None) -> dict:
         "receivable": 0,
         "budget": budget,
         "budgetRemaining": round(budget - totals["expense"], 2),
+        "allocatedBudget": allocated_budget,
+        "unallocatedBudget": round(budget - allocated_budget, 2),
+        "categoryBudgets": category_budgets,
         "breakdown": breakdown,
     }
 
@@ -1150,6 +1191,30 @@ class XUHandler(SimpleHTTPRequestHandler):
                         """,
                         (month, amount),
                     )
+                    category_budgets = payload.get("categoryBudgets", [])
+                    if not isinstance(category_budgets, list):
+                        raise ValueError("分类预算格式无效")
+                    for item in category_budgets:
+                        category_id = int(item.get("categoryId", 0))
+                        category = db.execute(
+                            "SELECT id FROM categories WHERE id=? AND kind='expense'", (category_id,)
+                        ).fetchone()
+                        if not category:
+                            raise ValueError("分类预算包含无效分类")
+                        raw_limit = item.get("amount")
+                        if raw_limit in {None, ""}:
+                            db.execute("DELETE FROM budgets WHERE category_id=? AND month=?", (category_id, month))
+                            continue
+                        limit_amount = round(float(raw_limit), 2)
+                        if limit_amount < 0:
+                            raise ValueError("分类预算不能小于 0")
+                        db.execute(
+                            """
+                            INSERT INTO budgets(category_id, month, limit_amount) VALUES (?, ?, ?)
+                            ON CONFLICT(category_id, month) DO UPDATE SET limit_amount=excluded.limit_amount
+                            """,
+                            (category_id, month, limit_amount),
+                        )
                 self.send_json({"ok": True})
             except (ValueError, json.JSONDecodeError) as exc:
                 self.send_error_json(str(exc))

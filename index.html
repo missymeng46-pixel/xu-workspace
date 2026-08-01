@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#c9cdd0" />
     <title>序 XU · 个人工作空间</title>
-    <link rel="stylesheet" href="styles.css?v=cool-20260731-24" />
-    <link rel="stylesheet" href="theme-cool.css?v=cool-20260731-24" />
+    <link rel="stylesheet" href="styles.css?v=cool-20260801-25" />
+    <link rel="stylesheet" href="theme-cool.css?v=cool-20260801-25" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -251,11 +251,13 @@
           <div><span class="micro-label">MONTHLY BUDGET</span><h2>设置本月预算</h2></div>
           <button type="button" class="close-button" data-close="budgetDialog" aria-label="关闭">×</button>
         </div>
-        <div class="budget-dialog-copy">预算会按本月每一笔支出自动递减，收入不会占用预算。</div>
+        <div class="budget-dialog-copy">总预算控制整个月的支出上限；分类预算像不同信封，饮食、工作等每一类都会按实际流水自动递减。</div>
         <div class="form-grid">
           <label class="field"><span>月份</span><input id="budgetMonth" type="month" readonly required /></label>
           <label class="field amount-field"><span>支出预算</span><div><b>¥</b><input id="budgetAmount" type="number" min="0" step="0.01" required /></div></label>
         </div>
+        <div class="category-budget-form-head"><span>分类预算</span><small>留空表示这个分类暂不设置额度</small></div>
+        <div id="categoryBudgetFields" class="category-budget-fields"></div>
         <div class="dialog-foot"><p><i></i> 每个月可以设置不同预算</p><button class="primary-button" type="submit">保存预算 <span>→</span></button></div>
       </form>
     </dialog>
@@ -343,6 +345,6 @@
 
     <div id="toast" class="toast"><span>✓</span><p></p></div>
     <script src="assets/vendor/qrcode.min.js"></script>
-    <script src="app.js?v=cool-20260731-24"></script>
+    <script src="app.js?v=cool-20260801-25"></script>
   </body>
 </html>
