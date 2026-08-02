@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#c9cdd0" />
     <title>序 XU · 个人工作空间</title>
-    <link rel="stylesheet" href="styles.css?v=cool-20260802-30" />
-    <link rel="stylesheet" href="theme-cool.css?v=cool-20260802-30" />
+    <link rel="stylesheet" href="styles.css?v=cool-20260802-32" />
+    <link rel="stylesheet" href="theme-cool.css?v=cool-20260802-32" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -265,7 +265,8 @@
           <label class="field field-wide"><span>收藏标题</span><input id="aestheticTitle" maxlength="200" placeholder="例如：克制但温暖的奶油色首页" required /></label>
           <label class="field field-wide"><span>放进哪个文件夹？</span><select id="aestheticFolder"><option value="colors">喜欢的配色</option><option value="homepages">喜欢的首页</option><option value="typography">喜欢的字体和排版</option><option value="charts">喜欢的图表</option><option value="three_d">喜欢的 3D</option><option value="motion">喜欢的动画</option><option value="instinct">不知道为什么，但就是喜欢</option></select></label>
           <label class="field field-wide"><span>原网页链接（选填）</span><input id="aestheticSourceUrl" type="url" maxlength="2000" placeholder="https://example.com" /></label>
-          <label class="field field-wide"><span>预览图片链接（选填）</span><input id="aestheticImageUrl" type="url" maxlength="2000" placeholder="https://example.com/image.jpg" /></label>
+          <div class="field field-wide aesthetic-image-field"><span>收藏图片</span><label class="aesthetic-upload-zone" id="aestheticUploadZone" for="aestheticImageFile"><input id="aestheticImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden /><img id="aestheticImagePreview" alt="图片预览" hidden /><span class="aesthetic-upload-symbol">↥</span><div id="aestheticUploadCopy"><strong>点击选择、拖入，或直接粘贴图片</strong><small>复制图片后按 Command + V · 最大 8 MB</small></div></label><button type="button" class="aesthetic-remove-image" id="removeAestheticImage" hidden>移除当前图片</button></div>
+          <label class="field field-wide"><span>或者粘贴图片链接（选填）</span><input id="aestheticImageUrl" type="url" maxlength="2000" placeholder="https://example.com/image.jpg" /></label>
           <label class="field field-wide"><span>我为什么喜欢它？（选填）</span><textarea id="aestheticNote" maxlength="1000" placeholder="例如：留白很大胆，黄色只出现在最重要的操作上。"></textarea></label>
         </div>
         <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteAesthetic" hidden>删除收藏</button><div class="form-actions"><button type="button" class="secondary-button" data-close="aestheticDialog">取消</button><button class="primary-button" type="submit">保存收藏 <span>→</span></button></div></div>
@@ -372,6 +373,6 @@
 
     <div id="toast" class="toast"><span>✓</span><p></p></div>
     <script src="assets/vendor/qrcode.min.js"></script>
-    <script src="app.js?v=cool-20260802-30"></script>
+    <script src="app.js?v=cool-20260802-32"></script>
   </body>
 </html>

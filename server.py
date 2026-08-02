@@ -24,6 +24,8 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from email.utils import parsedate_to_datetime
 from functools import partial
 from http import HTTPStatus
@@ -39,6 +41,7 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_ROOT = APP_DIR
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "xu.sqlite3"
+AESTHETIC_UPLOAD_DIR = DATA_DIR / "aesthetic_uploads"
 ENV_PATH = APP_DIR / ".env"
 MOBILE_COOKIE = "xu_mobile_session"
 MOBILE_ACCESS = {
@@ -53,6 +56,15 @@ WECHAT_CLASSIFY_LOCK = threading.Lock()
 VIBE_REFRESH_LOCK = threading.Lock()
 AESTHETIC_FOLDERS = {
     "colors", "homepages", "typography", "charts", "three_d", "motion", "instinct",
+}
+AESTHETIC_FOLDER_LABELS = {
+    "colors": "喜欢的配色",
+    "homepages": "喜欢的首页",
+    "typography": "喜欢的字体和排版",
+    "charts": "喜欢的图表",
+    "three_d": "喜欢的 3D",
+    "motion": "喜欢的动画",
+    "instinct": "不知道为什么，但就是喜欢",
 }
 
 
@@ -246,6 +258,13 @@ def init_database() -> None:
                 image_url TEXT NOT NULL DEFAULT '',
                 note TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS aesthetic_profile (
+                profile_key TEXT PRIMARY KEY,
+                profile_json TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """
@@ -698,13 +717,15 @@ def validate_aesthetic_item(payload: dict, current: sqlite3.Row | None = None) -
     if folder not in AESTHETIC_FOLDERS:
         raise ValueError("请选择有效的审美文件夹")
 
-    def web_url(payload_key: str, database_key: str, label: str) -> str:
+    def web_url(payload_key: str, database_key: str, label: str, allow_local_image: bool = False) -> str:
         if payload_key in payload:
             raw = str(payload.get(payload_key) or "").strip()
         else:
             raw = str(current[database_key] if current is not None else "").strip()
         if not raw:
             return ""
+        if allow_local_image and re.fullmatch(r"/api/aesthetic-images/[a-f0-9]{32}\.(?:jpg|png|webp|gif)", raw):
+            return raw
         parsed = urlparse(raw)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError(f"{label}需要是完整的 http 或 https 链接")
@@ -714,9 +735,136 @@ def validate_aesthetic_item(payload: dict, current: sqlite3.Row | None = None) -
         "title": title[:200],
         "folder": folder,
         "sourceUrl": web_url("sourceUrl", "source_url", "来源链接"),
-        "imageUrl": web_url("imageUrl", "image_url", "图片链接"),
+        "imageUrl": web_url("imageUrl", "image_url", "图片链接", allow_local_image=True),
         "note": value("note")[:1000],
     }
+
+
+def uploaded_aesthetic_path(image_url: str) -> Path | None:
+    match = re.fullmatch(r"/api/aesthetic-images/([a-f0-9]{32}\.(?:jpg|png|webp|gif))", str(image_url or ""))
+    return AESTHETIC_UPLOAD_DIR / match.group(1) if match else None
+
+
+def remove_uploaded_aesthetic_image(image_url: str) -> None:
+    path = uploaded_aesthetic_path(image_url)
+    if path and path.is_file():
+        path.unlink()
+
+
+def basic_aesthetic_profile(rows: list[sqlite3.Row]) -> dict:
+    counts = {key: 0 for key in AESTHETIC_FOLDERS}
+    noted = 0
+    for row in rows:
+        counts[row["folder"]] = counts.get(row["folder"], 0) + 1
+        noted += bool(str(row["note"] or "").strip())
+    ranked = sorted(counts, key=lambda key: counts[key], reverse=True)
+    used = [key for key in ranked if counts[key]]
+    keywords = [AESTHETIC_FOLDER_LABELS[key].replace("喜欢的", "") for key in used[:4]]
+    if not rows:
+        summary = "你的审美档案还没有开始。先收藏几个真正让你停下来的画面。"
+        patterns = ["收藏 3 条后，AI 会开始寻找你反复偏爱的视觉特征。"]
+    else:
+        leader = used[0]
+        summary = f"目前你最常留下的是“{AESTHETIC_FOLDER_LABELS[leader]}”，已占 {counts[leader]} 条。继续写下喜欢的原因，画像会越来越具体。"
+        patterns = [f"{AESTHETIC_FOLDER_LABELS[key]}：{counts[key]} 条" for key in used[:3]]
+        patterns.append(f"{noted} 条收藏写下了喜欢的原因" if noted else "还没有记录喜欢的原因")
+    return {
+        "summary": summary,
+        "keywords": keywords or ["等待积累"],
+        "patterns": patterns[:4],
+        "nextQuestion": "下次收藏时，试着写下是颜色、留白、层级还是情绪让你停了下来？",
+        "mode": "basic",
+        "itemCount": len(rows),
+        "updatedAt": "",
+    }
+
+
+def aesthetic_profile_payload(db: sqlite3.Connection) -> dict:
+    rows = db.execute("SELECT id, title, folder, source_url, note FROM aesthetic_items ORDER BY id DESC LIMIT 300").fetchall()
+    stored = db.execute(
+        "SELECT profile_json, item_count, updated_at FROM aesthetic_profile WHERE profile_key='default'"
+    ).fetchone()
+    if not stored:
+        profile = basic_aesthetic_profile(rows)
+        profile.update({"itemCount": 0, "currentItemCount": len(rows), "stale": bool(rows), "generated": False})
+        return profile
+    try:
+        profile = json.loads(stored["profile_json"])
+    except json.JSONDecodeError:
+        return basic_aesthetic_profile(rows)
+    profile.update({
+        "itemCount": int(stored["item_count"]),
+        "currentItemCount": len(rows),
+        "updatedAt": stored["updated_at"],
+        "stale": int(stored["item_count"]) != len(rows),
+        "generated": True,
+    })
+    return profile
+
+
+def refresh_aesthetic_profile(db: sqlite3.Connection) -> dict:
+    rows = db.execute(
+        "SELECT id, title, folder, source_url, note FROM aesthetic_items ORDER BY id DESC LIMIT 300"
+    ).fetchall()
+    profile = basic_aesthetic_profile(rows)
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if api_key and rows:
+        observations = [{
+            "title": row["title"],
+            "folder": AESTHETIC_FOLDER_LABELS.get(row["folder"], row["folder"]),
+            "note": row["note"],
+            "sourceHost": urlparse(row["source_url"]).netloc if row["source_url"] else "",
+        } for row in rows]
+        body = json.dumps({
+            "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是审美研究助手。只依据用户真实收藏的分类、标题和理由，归纳其视觉偏好；不要假装看过图片，不要补造颜色或风格。只返回 JSON：summary 为 70-130 字自然中文；keywords 为 4-7 个短词；patterns 为 3-5 条有证据的具体观察；nextQuestion 为一个能帮助用户更了解自己审美的问题。语气克制，不吹捧。",
+                },
+                {"role": "user", "content": json.dumps(observations, ensure_ascii=False)},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+            "max_tokens": 900,
+        }, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            f"{os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com').rstrip('/')}/chat/completions",
+            data=body,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=35) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            content = payload["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I)
+            result = json.loads(content)
+            summary = clean_feed_text(result.get("summary"), 320)
+            keywords = [clean_feed_text(item, 30) for item in result.get("keywords", []) if clean_feed_text(item, 30)][:7]
+            patterns = [clean_feed_text(item, 180) for item in result.get("patterns", []) if clean_feed_text(item, 180)][:5]
+            next_question = clean_feed_text(result.get("nextQuestion"), 180)
+            if summary and keywords and patterns:
+                profile.update({
+                    "summary": summary,
+                    "keywords": keywords,
+                    "patterns": patterns,
+                    "nextQuestion": next_question or profile["nextQuestion"],
+                    "mode": "ai",
+                })
+        except Exception:
+            profile["warning"] = "AI 暂时没有连接成功，当前显示本地基础画像。"
+    profile_json = {key: value for key, value in profile.items() if key not in {"itemCount", "updatedAt"}}
+    db.execute(
+        """
+        INSERT INTO aesthetic_profile(profile_key, profile_json, item_count) VALUES ('default', ?, ?)
+        ON CONFLICT(profile_key) DO UPDATE SET profile_json=excluded.profile_json,
+            item_count=excluded.item_count, updated_at=CURRENT_TIMESTAMP
+        """,
+        (json.dumps(profile_json, ensure_ascii=False), len(rows)),
+    )
+    return aesthetic_profile_payload(db)
 
 
 def fetch_public_url(url: str, *, timeout: int = 12) -> bytes:
@@ -1172,6 +1320,54 @@ class XUHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_binary(self, body: bytes, content_type: str, cache_control: str = "private, max-age=31536000") -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_aesthetic_upload(self) -> None:
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self.send_error_json("图片大小无效")
+        if size <= 0 or size > 8 * 1024 * 1024 + 128 * 1024:
+            return self.send_error_json("图片不能超过 8 MB", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data;"):
+            return self.send_error_json("请选择一张图片上传")
+        raw = self.rfile.read(size)
+        message = BytesParser(policy=email_policy).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw
+        )
+        image = None
+        for part in message.iter_parts():
+            if part.get_param("name", header="content-disposition") == "image":
+                image = part.get_payload(decode=True)
+                break
+        if not image:
+            return self.send_error_json("没有读取到图片内容")
+        if len(image) > 8 * 1024 * 1024:
+            return self.send_error_json("图片不能超过 8 MB", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        signatures = [
+            (lambda data: data.startswith(b"\xff\xd8\xff"), "jpg", "image/jpeg"),
+            (lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"), "png", "image/png"),
+            (lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP", "webp", "image/webp"),
+            (lambda data: data.startswith((b"GIF87a", b"GIF89a")), "gif", "image/gif"),
+        ]
+        match = next(((extension, mime) for check, extension, mime in signatures if check(image)), None)
+        if not match:
+            return self.send_error_json("目前支持 JPG、PNG、WebP 和 GIF 图片")
+        extension, mime = match
+        AESTHETIC_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"{secrets.token_hex(16)}.{extension}"
+        path = AESTHETIC_UPLOAD_DIR / filename
+        path.write_bytes(image)
+        self.send_json({"url": f"/api/aesthetic-images/{filename}", "size": len(image), "type": mime}, HTTPStatus.CREATED)
+
     def verify_wechat_signature(self, parsed) -> bool:
         token = os.environ.get("WECHAT_TOKEN", "").strip()
         if not token:
@@ -1323,6 +1519,13 @@ class XUHandler(SimpleHTTPRequestHandler):
             })
         if not self.require_authorized():
             return
+        image_match = re.fullmatch(r"/api/aesthetic-images/([a-f0-9]{32}\.(jpg|png|webp|gif))", parsed.path)
+        if image_match:
+            path = AESTHETIC_UPLOAD_DIR / image_match.group(1)
+            if not path.is_file():
+                return self.send_error_json("图片不存在", HTTPStatus.NOT_FOUND)
+            mime = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}[image_match.group(2)]
+            return self.send_binary(path.read_bytes(), mime)
         try:
             with connect() as db:
                 if parsed.path == "/api/bootstrap":
@@ -1337,6 +1540,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                         "projects": [row_dict(r) for r in db.execute("SELECT id, title, description, status, created_at AS createdAt FROM projects ORDER BY id DESC")],
                         "contentItems": [row_dict(r) for r in db.execute("SELECT id, title, description, status, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM content_items ORDER BY id DESC")],
                         "aestheticItems": [row_dict(r) for r in db.execute("SELECT id, title, folder, source_url AS sourceUrl, image_url AS imageUrl, note, created_at AS createdAt, updated_at AS updatedAt FROM aesthetic_items ORDER BY id DESC")],
+                        "aestheticProfile": aesthetic_profile_payload(db),
                         "exerciseCheckins": exercise_payload(db),
                         "notes": [row_dict(r) for r in db.execute("SELECT id, title, body, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM notes ORDER BY id DESC")],
                         "profile": {
@@ -1362,6 +1566,10 @@ class XUHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 print(f"微信回调处理失败：{exc}")
                 return self.send_text("消息处理失败", HTTPStatus.INTERNAL_SERVER_ERROR)
+        if parsed.path == "/api/aesthetic-upload":
+            if not self.require_authorized():
+                return
+            return self.handle_aesthetic_upload()
         try:
             payload = read_json(self)
             if parsed.path == "/api/mobile-login":
@@ -1369,7 +1577,9 @@ class XUHandler(SimpleHTTPRequestHandler):
             if not self.require_authorized():
                 return
             with connect() as db:
-                if parsed.path == "/api/transactions":
+                if parsed.path == "/api/aesthetic-profile/refresh":
+                    self.send_json(refresh_aesthetic_profile(db))
+                elif parsed.path == "/api/transactions":
                     tx = validate_transaction(payload, db)
                     cursor = db.execute(
                         """
@@ -1585,6 +1795,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                     current = db.execute("SELECT * FROM aesthetic_items WHERE id=?", (item_id,)).fetchone()
                     if not current:
                         return self.send_error_json("审美收藏不存在", HTTPStatus.NOT_FOUND)
+                    old_image_url = current["image_url"]
                     item = validate_aesthetic_item(payload, current)
                     db.execute(
                         """
@@ -1593,6 +1804,8 @@ class XUHandler(SimpleHTTPRequestHandler):
                         """,
                         (item["title"], item["folder"], item["sourceUrl"], item["imageUrl"], item["note"], item_id),
                     )
+                if old_image_url != item["imageUrl"]:
+                    remove_uploaded_aesthetic_image(old_image_url)
                 self.send_json({"ok": True})
             except (ValueError, json.JSONDecodeError) as exc:
                 self.send_error_json(str(exc))
@@ -1723,12 +1936,22 @@ class XUHandler(SimpleHTTPRequestHandler):
         if not self.require_authorized():
             return
         path = urlparse(self.path).path
+        image_match = re.fullmatch(r"/api/aesthetic-images/([a-f0-9]{32}\.(?:jpg|png|webp|gif))", path)
+        if image_match:
+            image_path = AESTHETIC_UPLOAD_DIR / image_match.group(1)
+            if image_path.is_file():
+                image_path.unlink()
+            return self.send_json({"ok": True})
+
         aesthetic_match = re.fullmatch(r"/api/aesthetic-items/(\d+)", path)
         if aesthetic_match:
             with connect() as db:
-                cursor = db.execute("DELETE FROM aesthetic_items WHERE id=?", (int(aesthetic_match.group(1)),))
+                item_id = int(aesthetic_match.group(1))
+                item = db.execute("SELECT image_url FROM aesthetic_items WHERE id=?", (item_id,)).fetchone()
+                cursor = db.execute("DELETE FROM aesthetic_items WHERE id=?", (item_id,))
                 if cursor.rowcount == 0:
                     return self.send_error_json("审美收藏不存在", HTTPStatus.NOT_FOUND)
+            remove_uploaded_aesthetic_image(item["image_url"] if item else "")
             return self.send_json({"ok": True})
 
         exercise_match = re.fullmatch(r"/api/exercise/(\d+)", path)

@@ -40,6 +40,19 @@ const state = {
   projects: [],
   contentItems: [],
   aestheticItems: [],
+  aestheticProfile: {
+    summary: "收藏 3 条后，AI 会开始寻找你反复偏爱的视觉特征。",
+    keywords: ["等待积累"],
+    patterns: [],
+    nextQuestion: "什么让你停下来多看了一眼？",
+    itemCount: 0,
+    currentItemCount: 0,
+    mode: "basic",
+  },
+  aestheticProfileLoading: false,
+  aestheticPendingFile: null,
+  aestheticExistingImageUrl: "",
+  aestheticPreviewObjectUrl: "",
   exerciseCheckins: [],
   notes: [],
   wechatStatus: {
@@ -106,7 +119,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     const payload = await api("/api/bootstrap");
     const signature = JSON.stringify([
       payload.summary, payload.transactions, payload.inbox, payload.tasks, payload.projects,
-      payload.contentItems, payload.aestheticItems, payload.exerciseCheckins, payload.notes, payload.profile, payload.wechatStatus,
+      payload.contentItems, payload.aestheticItems, payload.aestheticProfile, payload.exerciseCheckins, payload.notes, payload.profile, payload.wechatStatus,
     ]);
     const dataChanged = signature !== state.dataSignature;
     state.dataSignature = signature;
@@ -119,6 +132,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     state.projects = payload.projects || [];
     state.contentItems = payload.contentItems || [];
     state.aestheticItems = payload.aestheticItems || [];
+    state.aestheticProfile = payload.aestheticProfile || state.aestheticProfile;
     state.exerciseCheckins = payload.exerciseCheckins || [];
     state.notes = payload.notes || [];
     state.wechatStatus = payload.wechatStatus || state.wechatStatus;
@@ -166,6 +180,39 @@ async function loadVibeFeed({ force = false } = {}) {
   } finally {
     state.vibeFeedLoading = false;
     if (state.view === "vibe") render("vibe", { syncHistory: false });
+  }
+}
+
+async function uploadAestheticImage(file) {
+  const form = new FormData();
+  form.append("image", file, file.name);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch("/api/aesthetic-upload", { method: "POST", body: form, signal: controller.signal });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "图片上传失败");
+    return payload;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("图片上传超时，请检查工作台服务后重试");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function refreshAestheticProfile({ automatic = false } = {}) {
+  if (state.aestheticProfileLoading) return;
+  state.aestheticProfileLoading = true;
+  if (state.view === "aesthetic") render("aesthetic", { syncHistory: false });
+  try {
+    state.aestheticProfile = await api("/api/aesthetic-profile/refresh", { method: "POST", body: "{}" });
+    if (!automatic) showToast(state.aestheticProfile.mode === "ai" ? "AI 已重新理解你的审美" : "审美画像已更新");
+  } catch (error) {
+    if (!automatic) showToast(error.message, true);
+  } finally {
+    state.aestheticProfileLoading = false;
+    if (state.view === "aesthetic") render("aesthetic", { syncHistory: false });
   }
 }
 
@@ -317,6 +364,26 @@ function renderAestheticItems() {
   }).join("")}</div>`;
 }
 
+function renderAestheticProfile() {
+  const profile = state.aestheticProfile || {};
+  const currentCount = state.aestheticItems.length;
+  const learnedCount = Number(profile.itemCount || 0);
+  const ready = currentCount > 0;
+  const progress = Math.min(100, currentCount / 3 * 100);
+  const status = state.aestheticProfileLoading
+    ? "正在重新阅读你的收藏…"
+    : profile.mode === "ai" ? `AI 已读过 ${learnedCount} 条收藏` : currentCount >= 3 ? "可以生成第一份 AI 审美画像" : `再收藏 ${Math.max(0, 3 - currentCount)} 条，开始形成画像`;
+  return `<section class="aesthetic-ai-card ${profile.mode === "ai" ? "is-learned" : ""}">
+    <div class="aesthetic-ai-orbit"><span>AI</span><i></i><i></i></div>
+    <div class="aesthetic-ai-copy"><span class="micro-label">TASTE MODEL · LEARNS WITH YOU</span><h2>AI 审美画像</h2><p>${escapeHtml(profile.summary || "收藏 3 条后，AI 会开始寻找你反复偏爱的视觉特征。")}</p>
+      <div class="aesthetic-ai-keywords">${(profile.keywords || ["等待积累"]).map(keyword => `<span>${escapeHtml(keyword)}</span>`).join("")}</div>
+      ${(profile.patterns || []).length ? `<div class="aesthetic-ai-patterns">${profile.patterns.slice(0, 4).map(pattern => `<span>${escapeHtml(pattern)}</span>`).join("")}</div>` : ""}
+      <blockquote>${escapeHtml(profile.nextQuestion || "什么让你停下来多看了一眼？")}</blockquote>
+    </div>
+    <div class="aesthetic-ai-action"><small>${escapeHtml(status)}${profile.stale && profile.generated ? " · 有新收藏待学习" : ""}</small>${profile.mode !== "ai" && currentCount < 3 ? `<div class="aesthetic-learning-bar"><i style="width:${progress}%"></i></div>` : ""}<button type="button" id="refreshAestheticProfile" ${!ready || state.aestheticProfileLoading ? "disabled" : ""}>${state.aestheticProfileLoading ? "理解中…" : profile.generated ? "重新理解我的审美" : "生成我的审美画像"}</button></div>
+  </section>`;
+}
+
 function activeInboxItems() {
   return state.inbox.filter(item => item.status !== "processed");
 }
@@ -451,6 +518,7 @@ const views = {
 
   aesthetic: () => `
     <div class="page-heading aesthetic-heading"><div><span class="micro-label">AESTHETIC ARCHIVE · PERSONAL TASTE</span><h1>把喜欢留下，慢慢看见自己的<span class="accent-word">审美</span></h1></div><div class="page-heading-tools"><p>收藏不是囤积。记下你为什么停下来，久了就会形成只属于你的视觉语言。</p><button class="primary-button" id="addAesthetic">＋ 添加审美收藏</button></div></div>
+    ${renderAestheticProfile()}
     ${renderAestheticFolders()}
     <section class="aesthetic-collection-head"><div><span class="micro-label">COLLECTION</span><h2>${state.aestheticFilter === "all" ? "全部收藏" : aestheticFolder(state.aestheticFilter).label}</h2></div><span>${state.aestheticItems.filter(item => state.aestheticFilter === "all" || item.folder === state.aestheticFilter).length} ITEMS</span></section>
     ${renderAestheticItems()}`,
@@ -738,6 +806,7 @@ function bindViewEvents() {
   document.querySelector("#addContent")?.addEventListener("click", () => openContent());
   document.querySelector("#addAesthetic")?.addEventListener("click", () => openAesthetic());
   document.querySelector("#addAestheticEmpty")?.addEventListener("click", () => openAesthetic(null, state.aestheticFilter));
+  document.querySelector("#refreshAestheticProfile")?.addEventListener("click", () => refreshAestheticProfile());
   document.querySelectorAll("[data-aesthetic-folder]").forEach(button => button.addEventListener("click", () => {
     state.aestheticFilter = button.dataset.aestheticFolder;
     render("aesthetic", { syncHistory: false });
@@ -861,19 +930,53 @@ function openContent(id = null) {
   setTimeout(() => document.querySelector("#contentTitle").focus(), 60);
 }
 
+function clearAestheticObjectPreview() {
+  if (state.aestheticPreviewObjectUrl) URL.revokeObjectURL(state.aestheticPreviewObjectUrl);
+  state.aestheticPreviewObjectUrl = "";
+}
+
+function showAestheticImagePreview(url = "") {
+  const preview = document.querySelector("#aestheticImagePreview");
+  const zone = document.querySelector("#aestheticUploadZone");
+  const copy = document.querySelector("#aestheticUploadCopy");
+  const symbol = zone.querySelector(".aesthetic-upload-symbol");
+  preview.src = url;
+  preview.hidden = !url;
+  copy.hidden = Boolean(url);
+  symbol.hidden = Boolean(url);
+  zone.classList.toggle("has-image", Boolean(url));
+  document.querySelector("#removeAestheticImage").hidden = !url;
+}
+
+function chooseAestheticImage(file) {
+  const accepted = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+  if (!file || !accepted.has(file.type)) return showToast("请选择 JPG、PNG、WebP 或 GIF 图片", true);
+  if (file.size > 8 * 1024 * 1024) return showToast("图片不能超过 8 MB", true);
+  clearAestheticObjectPreview();
+  state.aestheticPendingFile = file;
+  state.aestheticExistingImageUrl = "";
+  state.aestheticPreviewObjectUrl = URL.createObjectURL(file);
+  document.querySelector("#aestheticImageUrl").value = "";
+  showAestheticImagePreview(state.aestheticPreviewObjectUrl);
+}
+
 function openAesthetic(id = null, preferredFolder = "all") {
   if (!state.apiReady) return showToast("请先启动本地数据服务", true);
   const item = id ? state.aestheticItems.find(entry => entry.id === id) : null;
   const folder = preferredFolder !== "all" && aestheticFolders.some(entry => entry.key === preferredFolder) ? preferredFolder : "colors";
   document.querySelector("#aestheticForm").reset();
+  clearAestheticObjectPreview();
+  state.aestheticPendingFile = null;
+  state.aestheticExistingImageUrl = item?.imageUrl || "";
   document.querySelector("#aestheticId").value = item?.id || "";
   document.querySelector("#aestheticDialogTitle").textContent = item ? "编辑审美收藏" : "添加审美收藏";
   document.querySelector("#aestheticTitle").value = item?.title || "";
   document.querySelector("#aestheticFolder").value = item?.folder || folder;
   document.querySelector("#aestheticSourceUrl").value = item?.sourceUrl || "";
-  document.querySelector("#aestheticImageUrl").value = item?.imageUrl || "";
+  document.querySelector("#aestheticImageUrl").value = item?.imageUrl?.startsWith("/api/aesthetic-images/") ? "" : item?.imageUrl || "";
   document.querySelector("#aestheticNote").value = item?.note || "";
   document.querySelector("#deleteAesthetic").hidden = !item;
+  showAestheticImagePreview(item?.imageUrl || "");
   document.querySelector("#aestheticDialog").showModal();
   setTimeout(() => document.querySelector("#aestheticTitle").focus(), 60);
 }
@@ -1126,7 +1229,14 @@ document.querySelector("#mobileLoginForm").addEventListener("submit", async even
   }
 });
 document.querySelector(".search-trigger").addEventListener("click", () => document.querySelector("#searchDialog").showModal());
-document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => document.querySelector(`#${button.dataset.close}`).close()));
+document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => {
+  document.querySelector(`#${button.dataset.close}`).close();
+  if (button.dataset.close === "aestheticDialog") {
+    clearAestheticObjectPreview();
+    state.aestheticPendingFile = null;
+    state.aestheticExistingImageUrl = "";
+  }
+}));
 document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { document.querySelector("#captureInput").value = button.dataset.example; }));
 document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener("change", () => syncCategoryOptions()));
 
@@ -1264,24 +1374,83 @@ document.querySelector("#contentForm").addEventListener("submit", async event =>
   }
 });
 
+document.querySelector("#aestheticImageFile").addEventListener("change", event => {
+  chooseAestheticImage(event.target.files?.[0]);
+});
+
+document.querySelector("#aestheticImageUrl").addEventListener("change", event => {
+  clearAestheticObjectPreview();
+  state.aestheticPendingFile = null;
+  state.aestheticExistingImageUrl = "";
+  showAestheticImagePreview(event.target.value.trim());
+});
+
+document.querySelector("#removeAestheticImage").addEventListener("click", () => {
+  clearAestheticObjectPreview();
+  state.aestheticPendingFile = null;
+  state.aestheticExistingImageUrl = "";
+  document.querySelector("#aestheticImageFile").value = "";
+  document.querySelector("#aestheticImageUrl").value = "";
+  showAestheticImagePreview("");
+});
+
+const aestheticUploadZone = document.querySelector("#aestheticUploadZone");
+["dragenter", "dragover"].forEach(type => aestheticUploadZone.addEventListener(type, event => {
+  event.preventDefault();
+  aestheticUploadZone.classList.add("is-dragging");
+}));
+["dragleave", "drop"].forEach(type => aestheticUploadZone.addEventListener(type, event => {
+  event.preventDefault();
+  aestheticUploadZone.classList.remove("is-dragging");
+}));
+aestheticUploadZone.addEventListener("drop", event => chooseAestheticImage(event.dataTransfer?.files?.[0]));
+document.addEventListener("paste", event => {
+  if (!document.querySelector("#aestheticDialog").open) return;
+  const imageItem = Array.from(event.clipboardData?.items || []).find(item => item.type.startsWith("image/"));
+  if (!imageItem) return;
+  event.preventDefault();
+  chooseAestheticImage(imageItem.getAsFile());
+});
+
 document.querySelector("#aestheticForm").addEventListener("submit", async event => {
   event.preventDefault();
   const id = document.querySelector("#aestheticId").value;
+  const submitButton = event.submitter || event.currentTarget.querySelector("button[type='submit']");
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = state.aestheticPendingFile ? "正在保存图片…" : "正在保存…";
   const payload = {
     title: document.querySelector("#aestheticTitle").value.trim(),
     folder: document.querySelector("#aestheticFolder").value,
     sourceUrl: document.querySelector("#aestheticSourceUrl").value.trim(),
-    imageUrl: document.querySelector("#aestheticImageUrl").value.trim(),
+    imageUrl: document.querySelector("#aestheticImageUrl").value.trim() || state.aestheticExistingImageUrl,
     note: document.querySelector("#aestheticNote").value.trim(),
   };
+  let uploadedUrl = "";
   try {
+    if (state.aestheticPendingFile) {
+      const uploaded = await uploadAestheticImage(state.aestheticPendingFile);
+      uploadedUrl = uploaded.url;
+      payload.imageUrl = uploaded.url;
+    }
     await api(id ? `/api/aesthetic-items/${id}` : "/api/aesthetic-items", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
     document.querySelector("#aestheticDialog").close();
+    clearAestheticObjectPreview();
+    state.aestheticPendingFile = null;
+    state.aestheticExistingImageUrl = "";
     state.aestheticFilter = payload.folder;
     await loadData({ quiet: true });
     showToast(id ? "审美收藏已更新" : "已经放进审美收藏夹");
+    const learnedCount = Number(state.aestheticProfile?.itemCount || 0);
+    if (state.aestheticItems.length >= 3 && state.aestheticItems.length - learnedCount >= 3) {
+      refreshAestheticProfile({ automatic: true });
+    }
   } catch (error) {
+    if (uploadedUrl) api(uploadedUrl, { method: "DELETE" }).catch(() => {});
     showToast(error.message, true);
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = originalLabel;
   }
 });
 

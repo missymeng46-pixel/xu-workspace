@@ -132,6 +132,19 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
 .aesthetic-dialog-intro { display: flex; align-items: center; gap: 13px; margin: 18px 0 22px; padding: 14px 16px; border-radius: 16px; background: #f5f0e8; }
 .aesthetic-dialog-intro span { color: #ca6f43; font-size: 21px; }
 .aesthetic-dialog-intro p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.aesthetic-image-field { position: relative; }
+.aesthetic-upload-zone { position: relative; min-height: 190px; display: grid; place-items: center; overflow: hidden; border: 1px dashed #aeb3b2; border-radius: 19px; color: var(--ink); background: #f5f6f5; cursor: pointer; text-align: center; transition: border-color .2s ease, background .2s ease, transform .2s ease; }
+.aesthetic-upload-zone::before, .aesthetic-upload-zone::after { content: ""; position: absolute; width: 28px; height: 28px; pointer-events: none; }
+.aesthetic-upload-zone::before { left: 12px; top: 12px; border-left: 2px solid var(--ink); border-top: 2px solid var(--ink); }
+.aesthetic-upload-zone::after { right: 12px; bottom: 12px; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); }
+.aesthetic-upload-zone:hover, .aesthetic-upload-zone.is-dragging { border-color: var(--ink); background: #f1eadf; transform: translateY(-2px); }
+.aesthetic-upload-zone.has-image { border-style: solid; background: #111; }
+.aesthetic-upload-zone > img { width: 100%; height: 250px; display: block; object-fit: contain; }
+.aesthetic-upload-symbol { width: 43px; height: 43px; display: grid; place-items: center; margin: 0 auto 11px; border-radius: 50%; color: #fff; background: var(--ink); font-size: 22px; }
+#aestheticUploadCopy strong, #aestheticUploadCopy small { display: block; }
+#aestheticUploadCopy strong { font-size: 12px; }
+#aestheticUploadCopy small { margin-top: 7px; color: var(--muted); font-size: 8px; }
+.aesthetic-remove-image { width: max-content; margin-top: 8px; padding: 6px 10px; border: 0; border-radius: 999px; color: #8e3d32; background: #f7e8e2; font: 650 8px var(--font); cursor: pointer; }
 .budget-dialog { width: min(560px, calc(100vw - 32px)); }
 .exercise-dialog { width: min(650px, calc(100vw - 32px)); }
 .budget-dialog form, .exercise-dialog form { padding: 31px; }
@@ -157,6 +170,30 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
 .note-card p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.6; white-space: pre-wrap; }
 
 .aesthetic-heading { align-items: end; }
+.aesthetic-ai-card { position: relative; display: grid; grid-template-columns: 130px minmax(0, 1fr) 190px; align-items: center; gap: 24px; min-height: 230px; margin-bottom: 17px; padding: 27px; overflow: hidden; border-radius: 25px; color: #fff; background: #151718; }
+.aesthetic-ai-card::after { content: ""; position: absolute; right: -95px; top: -135px; width: 330px; height: 330px; border: 1px solid #343738; border-radius: 50%; box-shadow: 0 0 0 38px rgba(255,255,255,.018), 0 0 0 82px rgba(255,255,255,.012); }
+.aesthetic-ai-orbit { position: relative; z-index: 1; width: 116px; height: 116px; display: grid; place-items: center; border: 1px solid #424647; border-radius: 50%; }
+.aesthetic-ai-orbit::before { content: ""; position: absolute; inset: 16px; border: 1px solid #343839; border-radius: 50%; }
+.aesthetic-ai-orbit span { position: relative; z-index: 2; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; color: var(--ink); background: var(--yellow); font-size: 13px; font-weight: 800; }
+.aesthetic-ai-orbit i { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #d38a5b; animation: taste-orbit 5s linear infinite; transform-origin: 0 44px; }
+.aesthetic-ai-orbit i:nth-child(3) { width: 5px; height: 5px; background: #86a8c2; animation-duration: 8s; transform-origin: 0 -50px; }
+@keyframes taste-orbit { to { transform: rotate(360deg); } }
+.aesthetic-ai-copy { position: relative; z-index: 1; min-width: 0; }
+.aesthetic-ai-copy .micro-label { color: var(--yellow); }
+.aesthetic-ai-copy h2 { margin: 5px 0 10px; font-size: 24px; letter-spacing: -.04em; }
+.aesthetic-ai-copy > p { max-width: 590px; margin: 0; color: #bec2c3; font-size: 10px; line-height: 1.75; }
+.aesthetic-ai-keywords { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.aesthetic-ai-keywords span { padding: 6px 9px; border: 1px solid #404445; border-radius: 999px; color: #f0f1f0; font-size: 8px; }
+.aesthetic-ai-patterns { display: grid; gap: 5px; margin-top: 13px; }
+.aesthetic-ai-patterns span { color: #9ca1a2; font-size: 8px; }
+.aesthetic-ai-patterns span::before { content: "↳ "; color: var(--yellow); }
+.aesthetic-ai-copy blockquote { margin: 15px 0 0; padding-left: 12px; border-left: 2px solid var(--yellow); color: #e3e5e4; font-size: 9px; font-style: normal; line-height: 1.6; }
+.aesthetic-ai-action { position: relative; z-index: 2; align-self: stretch; display: grid; align-content: end; gap: 10px; }
+.aesthetic-ai-action small { color: #929798; font-size: 8px; line-height: 1.5; }
+.aesthetic-ai-action button { min-height: 40px; padding: 0 13px; border: 0; border-radius: 999px; color: var(--ink); background: var(--yellow); font: 750 9px var(--font); cursor: pointer; }
+.aesthetic-ai-action button:disabled { color: #777c7d; background: #303334; cursor: default; }
+.aesthetic-learning-bar { height: 4px; overflow: hidden; border-radius: 99px; background: #303435; }
+.aesthetic-learning-bar i { height: 100%; display: block; background: var(--yellow); transition: width .35s ease; }
 .aesthetic-folders { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; margin-bottom: 35px; }
 .aesthetic-folder { --folder-accent: #e9d95f; position: relative; min-height: 132px; padding: 19px; overflow: hidden; border: 1px solid var(--line); border-radius: 21px; color: var(--ink); background: #fff; cursor: pointer; text-align: left; transition: transform .22s ease, border-color .22s ease, box-shadow .22s ease; }
 .aesthetic-folder::after { content: ""; position: absolute; right: -22px; bottom: -34px; width: 90px; height: 90px; border-radius: 50%; background: var(--folder-accent); opacity: .24; }
@@ -386,6 +423,14 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
   .aesthetic-folders { display: flex; overflow-x: auto; gap: 9px; padding-bottom: 5px; scroll-snap-type: x mandatory; }
   .aesthetic-folder { flex: 0 0 165px; scroll-snap-align: start; }
   .aesthetic-grid { grid-template-columns: 1fr; }
+  .aesthetic-ai-card { grid-template-columns: 74px minmax(0, 1fr); gap: 15px; padding: 20px; }
+  .aesthetic-ai-orbit { width: 70px; height: 70px; }
+  .aesthetic-ai-orbit::before { inset: 10px; }
+  .aesthetic-ai-orbit span { width: 34px; height: 34px; font-size: 10px; }
+  .aesthetic-ai-orbit i { transform-origin: 0 29px; }
+  .aesthetic-ai-orbit i:nth-child(3) { transform-origin: 0 -31px; }
+  .aesthetic-ai-copy h2 { font-size: 20px; }
+  .aesthetic-ai-action { grid-column: 1 / -1; }
   .exercise-hero { grid-template-columns: 1fr; }
   .exercise-hero-copy { padding: 25px; }
   .exercise-cat-wrap { min-height: 180px; }
