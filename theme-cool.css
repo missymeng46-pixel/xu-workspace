@@ -160,6 +160,9 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
 .project-card { width: 100%; text-align: left; font-family: var(--font); cursor: pointer; }
 .project-card p { min-height: 34px; margin: 11px 0 16px; color: var(--muted); font-size: 10px; line-height: 1.65; }
 .project-card:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(30,34,35,.08); }
+.project-kanban { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.project-card[data-project-status="done"] { background: #f2f6f1; border-color: #d8e4d5; }
+.project-card[data-project-status="done"] .tag { color: #486344; background: #dcebd8; }
 .project-slip { cursor: pointer; font-family: var(--font); text-align: left; }
 .content-snapshot { width: 100%; border: 0; cursor: pointer; text-align: left; }
 .note-archive { margin-top: 18px; }
@@ -384,7 +387,7 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
 
 @media (max-width: 900px) {
   .cat-dock { grid-template-columns: 1fr 1fr; }
-  .finance-metrics, .content-kanban { grid-template-columns: 1fr 1fr; }
+  .finance-metrics, .content-kanban, .project-kanban { grid-template-columns: 1fr 1fr; }
   .exercise-layout { grid-template-columns: 1fr; }
   .phone-access-trigger b { display: none; }
   .phone-access-trigger { width: 38px; padding: 0; justify-content: center; }
@@ -413,7 +416,7 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
   .receipt-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .page-heading-tools { justify-items: start; }
   .note-grid { grid-template-columns: 1fr; }
-  .finance-metrics, .content-kanban { grid-template-columns: 1fr; }
+  .finance-metrics, .content-kanban, .project-kanban { grid-template-columns: 1fr; }
   .plan-metrics, .plan-board { grid-template-columns: 1fr; }
   .plan-board { gap: 13px; }
   .plan-section { padding: 20px; }

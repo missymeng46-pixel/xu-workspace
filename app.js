@@ -15,6 +15,7 @@ const aestheticFolders = [
   { key: "motion", label: "喜欢的动画", code: "MOTION", mark: "M" },
   { key: "instinct", label: "不知道为什么，但就是喜欢", code: "JUST LIKE", mark: "?" },
 ];
+const projectStatusLabels = { todo: "待开始", doing: "进行中", review: "待确认", done: "已完成" };
 
 const state = {
   view: "today",
@@ -501,10 +502,11 @@ const views = {
 
   projects: () => `
     <div class="page-heading"><div><span class="micro-label">PROJECT ROOM · 04</span><h1>让项目持续<span class="accent-word">向前</span></h1></div><div class="page-heading-tools"><p>进度、投入和回报放在一起，避免用忙碌掩盖真正的停滞。</p><button class="primary-button" id="addProject">＋ 添加项目</button></div></div>
-    <div class="kanban">
+    <div class="kanban project-kanban">
       ${renderProjectColumn("待开始", "todo")}
       ${renderProjectColumn("进行中", "doing")}
       ${renderProjectColumn("待确认", "review")}
+      ${renderProjectColumn("已完成", "done")}
     </div>`,
 
   content: () => `
@@ -655,8 +657,8 @@ function kanbanColumn(title, cards) {
 function renderProjectColumn(title, status) {
   const projects = state.projects.filter(project => project.status === status);
   return `<section class="kanban-column"><div class="kanban-head"><span>${title}</span><b>${projects.length}</b></div>${projects.length ? projects.map(project => `
-    <button type="button" class="kanban-card project-card" data-edit-project="${project.id}">
-      <span class="tag">${status === "todo" ? "待开始" : status === "doing" ? "进行中" : "待确认"}</span>
+    <button type="button" class="kanban-card project-card" data-project-status="${status}" data-edit-project="${project.id}">
+      <span class="tag">${projectStatusLabels[status]}</span>
       <h4>${escapeHtml(project.title)}</h4>
       <p>${escapeHtml(project.description || "点击补充项目说明")}</p>
       <footer><span>本地项目</span><span>编辑 →</span></footer>

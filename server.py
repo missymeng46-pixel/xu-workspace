@@ -215,7 +215,7 @@ def init_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'doing', 'review')),
+                status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'doing', 'review', 'done')),
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -280,6 +280,28 @@ def init_database() -> None:
             db.execute("ALTER TABLE inbox ADD COLUMN processed_at TEXT")
         if "destination_id" not in inbox_columns:
             db.execute("ALTER TABLE inbox ADD COLUMN destination_id INTEGER")
+        projects_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'").fetchone()[0]
+        if "'done'" not in projects_schema:
+            db.execute("ALTER TABLE projects RENAME TO projects_before_done")
+            db.execute(
+                """
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'doing', 'review', 'done')),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            db.execute(
+                """
+                INSERT INTO projects(id, title, description, status, created_at, updated_at)
+                SELECT id, title, description, status, created_at, updated_at FROM projects_before_done
+                """
+            )
+            db.execute("DROP TABLE projects_before_done")
         if db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0:
             seed_database(db)
         expense_names = {row["name"] for row in db.execute("SELECT name FROM categories WHERE kind='expense'")}
@@ -1595,7 +1617,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                     status = str(payload.get("status", "todo")).strip()
                     if not title:
                         raise ValueError("项目名称不能为空")
-                    if status not in {"todo", "doing", "review"}:
+                    if status not in {"todo", "doing", "review", "done"}:
                         raise ValueError("项目状态无效")
                     cursor = db.execute(
                         "INSERT INTO projects(title, description, status) VALUES (?, ?, ?)",
@@ -1849,7 +1871,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                     status = str(payload.get("status", project["status"])).strip()
                     if not title:
                         raise ValueError("项目名称不能为空")
-                    if status not in {"todo", "doing", "review"}:
+                    if status not in {"todo", "doing", "review", "done"}:
                         raise ValueError("项目状态无效")
                     db.execute(
                         "UPDATE projects SET title=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
