@@ -53,6 +53,10 @@ const state = {
   dataSignature: "",
   remoteSyncing: false,
   expandedTransactionGroups: new Set(),
+  vibeFeed: null,
+  vibeFeedLoading: false,
+  vibeFilter: "all",
+  savedVibeIds: new Set(),
 };
 
 const icons = {
@@ -67,6 +71,7 @@ const icons = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>',
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg>',
   phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10 5h4M11 18.5h2"/></svg>',
+  radar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><path d="m12 12 6.5-4M3.5 12h2M18.5 12h2"/></svg>',
 };
 
 async function api(path, options = {}) {
@@ -131,6 +136,23 @@ async function syncLinkedDevices() {
     await loadData({ quiet: true, renderUnchanged: false });
   } finally {
     state.remoteSyncing = false;
+  }
+}
+
+async function loadVibeFeed({ force = false } = {}) {
+  if (state.vibeFeedLoading) return;
+  state.vibeFeedLoading = true;
+  if (state.view === "vibe") render("vibe", { syncHistory: false });
+  try {
+    state.vibeFeed = await api(`/api/vibe-feed${force ? "?refresh=1" : ""}`);
+    state.vibeFeed.items.forEach(item => {
+      if (state.contentItems.some(content => String(content.description || "").includes(item.url))) state.savedVibeIds.add(item.id);
+    });
+  } catch (error) {
+    showToast(`Vibe 雷达刷新失败：${error.message}`, true);
+  } finally {
+    state.vibeFeedLoading = false;
+    if (state.view === "vibe") render("vibe", { syncHistory: false });
   }
 }
 
@@ -208,6 +230,40 @@ function planGroups() {
     later: openTasks.filter(task => task.dueDate > weekEnd).sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
     completed: state.tasks.filter(task => task.completedAt).sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt))),
   };
+}
+
+function formatVibeTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "近期";
+  const hours = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 3600000));
+  if (hours < 1) return "刚刚";
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function vibeKindLabel(kind) {
+  return { project: "新作", article: "文章", discussion: "讨论" }[kind] || "动态";
+}
+
+function renderVibeItems() {
+  if (state.vibeFeedLoading && !state.vibeFeed) return '<div class="vibe-loading"><i></i><strong>正在扫描全球 Vibe Coding 动态…</strong><span>GitHub · Hacker News · Global News</span></div>';
+  if (!state.vibeFeed?.items?.length) return '<div class="empty-state vibe-empty">暂时没有抓取到内容。检查网络后点击“重新扫描”。</div>';
+  const items = state.vibeFeed.items.filter(item => state.vibeFilter === "all" || item.kind === state.vibeFilter);
+  if (!items.length) return '<div class="empty-state vibe-empty">这个分类暂时没有内容，试试其他筛选。</div>';
+  return `<div class="vibe-grid">${items.map(item => {
+    const saved = state.savedVibeIds.has(item.id);
+    const meta = item.kind === "project"
+      ? `${item.language || "多语言"} · ★ ${item.stars || 0}`
+      : item.kind === "discussion" ? `${item.points || 0} points · ${item.comments || 0} comments` : item.source;
+    return `<article class="vibe-card vibe-${item.kind}">
+      <div class="vibe-card-top"><span class="vibe-source">${escapeHtml(item.source)}</span><span class="vibe-freshness ${item.isToday ? "today" : ""}">${item.isToday ? "今日" : formatVibeTime(item.publishedAt)}</span></div>
+      <span class="vibe-kind">${vibeKindLabel(item.kind)}</span>
+      <h3>${escapeHtml(item.title)}</h3>
+      <p>${escapeHtml(item.description || "查看这条 Vibe Coding 动态的完整内容。")}</p>
+      <div class="vibe-meta"><span>${escapeHtml(meta)}</span>${item.author ? `<span>by ${escapeHtml(item.author)}</span>` : ""}</div>
+      <div class="vibe-actions"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">查看原文 ↗</a><button type="button" data-save-vibe="${item.id}" ${saved ? "disabled" : ""}>${saved ? "已收进灵感" : "＋ 收进内容灵感"}</button></div>
+    </article>`;
+  }).join("")}</div>`;
 }
 
 function activeInboxItems() {
@@ -341,6 +397,16 @@ const views = {
       ${renderContentColumn("待发布", "ready")}
       ${renderContentColumn("已发布", "published")}
     </div>`,
+
+  vibe: () => {
+    const stats = state.vibeFeed?.stats || { today: 0, projects: 0, articles: 0, discussions: 0 };
+    return `
+    <div class="page-heading vibe-heading"><div><span class="micro-label">VIBE RADAR · GLOBAL</span><h1>今天，全世界用 AI <span class="accent-word">做出了什么</span></h1></div><div class="page-heading-tools"><p>聚合全球当天与最近 7 天的 Vibe Coding 新作、文章和开发者讨论。</p><button class="primary-button" id="refreshVibe" ${state.vibeFeedLoading ? "disabled" : ""}>${state.vibeFeedLoading ? "扫描中…" : "重新扫描 ↻"}</button></div></div>
+    <div class="metric-row vibe-metrics"><div class="metric"><span>今日发现</span><strong>${stats.today}</strong><small>明确发布于今天</small></div><div class="metric"><span>新项目</span><strong>${stats.projects}</strong><small>GitHub 全球新作</small></div><div class="metric"><span>文章</span><strong>${stats.articles}</strong><small>媒体与创作者内容</small></div><div class="metric"><span>讨论</span><strong>${stats.discussions}</strong><small>开发者社区热议</small></div></div>
+    <section class="vibe-toolbar"><div class="vibe-filters">${[["all","全部"],["project","新作"],["article","文章"],["discussion","讨论"]].map(([value,label]) => `<button type="button" data-vibe-filter="${value}" class="${state.vibeFilter === value ? "active" : ""}">${label}</button>`).join("")}</div><span>${state.vibeFeed ? `${state.vibeFeed.cached ? "缓存结果" : "刚刚更新"} · ${state.vibeFeed.items.length} 条` : "等待第一次扫描"}</span></section>
+    ${state.vibeFeed?.errors?.length ? `<div class="vibe-source-warning">${state.vibeFeed.errors.map(escapeHtml).join(" · ")}</div>` : ""}
+    ${renderVibeItems()}`;
+  },
 
   exercise: () => `
     <div class="page-heading exercise-heading"><div><span class="micro-label">MOVE LOG · 06</span><h1>每天动一点，身体会<span class="accent-word">记得</span></h1></div><div class="page-heading-tools"><p>记录今天主要做了什么，让运动变成看得见的长期积累。</p><button class="primary-button" id="addExercise">＋ 今日运动打卡</button></div></div>
@@ -578,6 +644,10 @@ function render(view = state.view, { syncHistory = true } = {}) {
 }
 
 function bindViewEvents() {
+  if (state.view === "vibe" && !state.vibeFeed && !state.vibeFeedLoading) {
+    loadVibeFeed();
+    return;
+  }
   document.querySelectorAll("[data-go]").forEach(button => button.addEventListener("click", () => render(button.dataset.go)));
   document.querySelectorAll("[data-cat-action]").forEach(button => button.addEventListener("click", () => {
     const actions = {
@@ -608,6 +678,30 @@ function bindViewEvents() {
   document.querySelector("#addProject")?.addEventListener("click", () => openProject());
   document.querySelectorAll("[data-edit-project]").forEach(button => button.addEventListener("click", () => openProject(Number(button.dataset.editProject))));
   document.querySelector("#addContent")?.addEventListener("click", () => openContent());
+  document.querySelector("#refreshVibe")?.addEventListener("click", () => loadVibeFeed({ force: true }));
+  document.querySelectorAll("[data-vibe-filter]").forEach(button => button.addEventListener("click", () => {
+    state.vibeFilter = button.dataset.vibeFilter;
+    render("vibe", { syncHistory: false });
+  }));
+  document.querySelectorAll("[data-save-vibe]").forEach(button => button.addEventListener("click", async () => {
+    const item = state.vibeFeed?.items?.find(entry => entry.id === button.dataset.saveVibe);
+    if (!item) return;
+    button.disabled = true;
+    try {
+      await api("/api/content", { method: "POST", body: JSON.stringify({
+        title: item.title,
+        description: `${item.description || ""}\n来源：${item.source}\n${item.url}`,
+        status: "idea",
+      }) });
+      state.savedVibeIds.add(item.id);
+      await loadData({ quiet: true, renderUnchanged: false });
+      render("vibe", { syncHistory: false });
+      showToast("已收进内容模块的灵感池");
+    } catch (error) {
+      button.disabled = false;
+      showToast(error.message, true);
+    }
+  }));
   document.querySelectorAll("[data-edit-content]").forEach(button => button.addEventListener("click", () => openContent(Number(button.dataset.editContent))));
   document.querySelector("#addIncome")?.addEventListener("click", () => openTransaction(null, null, "income"));
   document.querySelector("#addExpense")?.addEventListener("click", () => openTransaction(null, null, "expense"));

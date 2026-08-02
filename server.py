@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import html
 import hmac
 import ipaddress
 import io
@@ -21,14 +22,16 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from functools import partial
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -47,6 +50,7 @@ MOBILE_ACCESS = {
 }
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 WECHAT_CLASSIFY_LOCK = threading.Lock()
+VIBE_REFRESH_LOCK = threading.Lock()
 
 
 def find_lan_ip() -> str:
@@ -223,6 +227,12 @@ def init_database() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS vibe_feed_cache (
+                cache_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
@@ -661,6 +671,185 @@ def exercise_payload(db: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def fetch_public_url(url: str, *, timeout: int = 12) -> bytes:
+    request = Request(url, headers={"User-Agent": "XU-Workspace/1.0 (+local Vibe Radar)"})
+    with urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def clean_feed_text(value: object, limit: int = 280) -> str:
+    text = html.unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def published_on_local_date(value: object, target: date) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        published = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if published.tzinfo is not None:
+            published = published.astimezone()
+        return published.date() == target
+    except ValueError:
+        return raw[:10] == target.isoformat()
+
+
+def fetch_github_vibe_items(since: date) -> list[dict]:
+    query = f'"vibe coding" created:>={since.isoformat()}'
+    url = "https://api.github.com/search/repositories?" + urlencode({
+        "q": query, "sort": "updated", "order": "desc", "per_page": 20,
+    })
+    payload = json.loads(fetch_public_url(url).decode("utf-8"))
+    return [{
+        "source": "GitHub",
+        "kind": "project",
+        "title": item.get("full_name") or item.get("name") or "Untitled project",
+        "url": item.get("html_url", ""),
+        "description": clean_feed_text(item.get("description") or "新发布的 Vibe Coding 项目"),
+        "author": (item.get("owner") or {}).get("login", ""),
+        "publishedAt": item.get("created_at", ""),
+        "stars": int(item.get("stargazers_count") or 0),
+        "language": item.get("language") or "",
+    } for item in payload.get("items", [])]
+
+
+def fetch_hn_vibe_items(since: date) -> list[dict]:
+    since_timestamp = int(datetime.combine(since, datetime.min.time()).timestamp())
+    url = "https://hn.algolia.com/api/v1/search_by_date?" + urlencode({
+        "query": "vibe coding", "tags": "story", "hitsPerPage": 25,
+        "numericFilters": f"created_at_i>{since_timestamp}",
+    })
+    payload = json.loads(fetch_public_url(url).decode("utf-8"))
+    items = []
+    for item in payload.get("hits", []):
+        object_id = str(item.get("objectID") or "")
+        items.append({
+            "source": "Hacker News",
+            "kind": "discussion",
+            "title": clean_feed_text(item.get("title") or item.get("story_title"), 180),
+            "url": item.get("url") or f"https://news.ycombinator.com/item?id={object_id}",
+            "description": clean_feed_text(item.get("story_text") or "全球开发者正在讨论这项 Vibe Coding 动态。"),
+            "author": item.get("author") or "",
+            "publishedAt": item.get("created_at") or "",
+            "points": int(item.get("points") or 0),
+            "comments": int(item.get("num_comments") or 0),
+        })
+    return items
+
+
+def fetch_news_vibe_items() -> list[dict]:
+    url = "https://news.google.com/rss/search?" + urlencode({
+        "q": '"vibe coding" when:7d', "hl": "en-US", "gl": "US", "ceid": "US:en",
+    })
+    root = ET.fromstring(fetch_public_url(url))
+    items = []
+    for node in root.findall("./channel/item")[:30]:
+        published = node.findtext("pubDate") or ""
+        try:
+            published = parsedate_to_datetime(published).isoformat()
+        except (TypeError, ValueError):
+            pass
+        source_node = node.find("source")
+        items.append({
+            "source": clean_feed_text(source_node.text if source_node is not None else "Global News", 60),
+            "kind": "article",
+            "title": clean_feed_text(node.findtext("title"), 180),
+            "url": node.findtext("link") or "",
+            "description": "来自全球媒体与创作者的 Vibe Coding 相关文章。",
+            "author": "",
+            "publishedAt": published,
+        })
+    return items
+
+
+def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
+    cache = db.execute(
+        "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global'"
+    ).fetchone()
+    if cache:
+        try:
+            cached_at = datetime.fromisoformat(cache["fetched_at"])
+            age = (datetime.utcnow() - cached_at).total_seconds()
+            if age < (60 if force else 1800):
+                payload = json.loads(cache["payload_json"])
+                payload["cached"] = True
+                return payload
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+    with VIBE_REFRESH_LOCK:
+        # A concurrent request may have completed while this request waited for the lock.
+        latest = db.execute(
+            "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global'"
+        ).fetchone()
+        if latest and (not cache or latest["fetched_at"] != cache["fetched_at"]):
+            try:
+                payload = json.loads(latest["payload_json"])
+                payload["cached"] = True
+                return payload
+            except json.JSONDecodeError:
+                pass
+        today = date.today()
+        since = today - timedelta(days=7)
+        fetchers = [
+            ("GitHub", lambda: fetch_github_vibe_items(since)),
+            ("Hacker News", lambda: fetch_hn_vibe_items(since)),
+            ("Global News", fetch_news_vibe_items),
+        ]
+        collected, errors = [], []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(fetcher): name for name, fetcher in fetchers}
+            for future in as_completed(futures):
+                try:
+                    collected.extend(future.result())
+                except Exception as exc:
+                    errors.append(f"{futures[future]} 暂时不可用：{type(exc).__name__}")
+        seen, items = set(), []
+        for item in collected:
+            url = str(item.get("url") or "")
+            title = clean_feed_text(item.get("title"), 180)
+            if not title or not url.startswith("https://"):
+                continue
+            dedupe_key = re.sub(r"\W+", "", title.lower())[:100] or url
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            published = str(item.get("publishedAt") or "")
+            item["title"] = title
+            item["isToday"] = published_on_local_date(published, today)
+            item["id"] = hashlib.sha256(f"{item['source']}|{url}".encode()).hexdigest()[:16]
+            items.append(item)
+        items.sort(key=lambda item: str(item.get("publishedAt") or ""), reverse=True)
+        items.sort(key=lambda item: item["isToday"], reverse=True)
+        items = items[:60]
+        payload = {
+            "date": today.isoformat(),
+            "fetchedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "cached": False,
+            "items": items,
+            "stats": {
+                "today": sum(1 for item in items if item["isToday"]),
+                "projects": sum(1 for item in items if item["kind"] == "project"),
+                "articles": sum(1 for item in items if item["kind"] == "article"),
+                "discussions": sum(1 for item in items if item["kind"] == "discussion"),
+            },
+            "errors": errors,
+        }
+        if not items and cache:
+            fallback = json.loads(cache["payload_json"])
+            fallback.update({"cached": True, "errors": errors or ["网络不可用，正在显示上一次结果"]})
+            return fallback
+        db.execute(
+            """
+            INSERT INTO vibe_feed_cache(cache_key, payload_json, fetched_at) VALUES ('global', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, fetched_at=CURRENT_TIMESTAMP
+            """,
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+        return payload
+
+
 def validate_exercise(payload: dict) -> dict:
     exercise_date = str(payload.get("date", "")).strip()
     date.fromisoformat(exercise_date)
@@ -1022,6 +1211,9 @@ class XUHandler(SimpleHTTPRequestHandler):
                         "wechatStatus": wechat_status_payload(db),
                         "client": {"local": self.is_local_client()},
                     })
+                elif parsed.path == "/api/vibe-feed":
+                    force = parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+                    self.send_json(vibe_feed_payload(db, force=force))
                 else:
                     self.send_error_json("接口不存在", HTTPStatus.NOT_FOUND)
         except Exception as exc:

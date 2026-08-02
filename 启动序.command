@@ -17,7 +17,7 @@ if [[ -f "$PORT_FILE" ]]; then
   saved_port="$(<"$PORT_FILE")"
   health_payload="$(curl -fsS "http://127.0.0.1:$saved_port/api/health" 2>/dev/null || true)"
   if [[ "$saved_port" == <-> ]] && print -r -- "$health_payload" | grep -Fq "$APP_DIR/data/xu.sqlite3" && print -r -- "$health_payload" | grep -Fq '"mobileAccess": true'; then
-    open "http://127.0.0.1:$saved_port/?v=cool-20260801-25&ts=$(date +%s)"
+    open "http://127.0.0.1:$saved_port/?v=cool-20260802-27&ts=$(date +%s)"
     exit 0
   fi
 fi
@@ -40,7 +40,7 @@ trap 'rm -f "$PORT_FILE"; kill "$server_pid" 2>/dev/null' EXIT INT TERM
 for _ in {1..20}; do
   if curl -fsS "http://127.0.0.1:$port/api/health" >/dev/null 2>&1; then
     echo "$port" > "$PORT_FILE"
-    open "http://127.0.0.1:$port/?v=cool-20260801-25&ts=$(date +%s)"
+    open "http://127.0.0.1:$port/?v=cool-20260802-27&ts=$(date +%s)"
     wait "$server_pid"
     exit $?
   fi

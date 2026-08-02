@@ -304,7 +304,7 @@ dialog::backdrop { background: rgba(30,33,34,.44); backdrop-filter: blur(8px); }
   .mobile-nav button.active { color: #fff; }
   .mobile-nav .mobile-capture { color: var(--ink); background: var(--yellow); border: 0; }
   .phone-access-trigger { display: none; }
-  .mobile-nav { grid-template-columns: repeat(7, 1fr); }
+  .mobile-nav { grid-template-columns: repeat(8, minmax(0, 1fr)); }
   .cat-dock { gap: 11px; }
   .cat-sticker { min-height: 150px; padding: 10px; }
   .cat-sticker img { height: 99px; }
