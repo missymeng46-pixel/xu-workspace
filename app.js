@@ -6,6 +6,15 @@ function localIsoDate(date = new Date()) {
 }
 
 const todayIso = localIsoDate();
+const aestheticFolders = [
+  { key: "colors", label: "喜欢的配色", code: "COLOR", mark: "C" },
+  { key: "homepages", label: "喜欢的首页", code: "HOME", mark: "H" },
+  { key: "typography", label: "喜欢的字体和排版", code: "TYPE", mark: "T" },
+  { key: "charts", label: "喜欢的图表", code: "CHART", mark: "G" },
+  { key: "three_d", label: "喜欢的 3D", code: "3D", mark: "3" },
+  { key: "motion", label: "喜欢的动画", code: "MOTION", mark: "M" },
+  { key: "instinct", label: "不知道为什么，但就是喜欢", code: "JUST LIKE", mark: "?" },
+];
 
 const state = {
   view: "today",
@@ -30,6 +39,7 @@ const state = {
   tasks: [],
   projects: [],
   contentItems: [],
+  aestheticItems: [],
   exerciseCheckins: [],
   notes: [],
   wechatStatus: {
@@ -57,6 +67,7 @@ const state = {
   vibeFeedLoading: false,
   vibeFilter: "all",
   savedVibeIds: new Set(),
+  aestheticFilter: "all",
 };
 
 const icons = {
@@ -72,6 +83,7 @@ const icons = {
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg>',
   phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10 5h4M11 18.5h2"/></svg>',
   radar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><path d="m12 12 6.5-4M3.5 12h2M18.5 12h2"/></svg>',
+  aesthetic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.2 14 9l5.8 2-5.8 2-2 5.8-2-5.8-5.8-2 5.8-2z"/><path d="m18.2 3 .7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/></svg>',
 };
 
 async function api(path, options = {}) {
@@ -94,7 +106,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     const payload = await api("/api/bootstrap");
     const signature = JSON.stringify([
       payload.summary, payload.transactions, payload.inbox, payload.tasks, payload.projects,
-      payload.contentItems, payload.exerciseCheckins, payload.notes, payload.profile, payload.wechatStatus,
+      payload.contentItems, payload.aestheticItems, payload.exerciseCheckins, payload.notes, payload.profile, payload.wechatStatus,
     ]);
     const dataChanged = signature !== state.dataSignature;
     state.dataSignature = signature;
@@ -106,6 +118,7 @@ async function loadData({ quiet = false, renderUnchanged = true } = {}) {
     state.tasks = payload.tasks || [];
     state.projects = payload.projects || [];
     state.contentItems = payload.contentItems || [];
+    state.aestheticItems = payload.aestheticItems || [];
     state.exerciseCheckins = payload.exerciseCheckins || [];
     state.notes = payload.notes || [];
     state.wechatStatus = payload.wechatStatus || state.wechatStatus;
@@ -248,7 +261,9 @@ function vibeKindLabel(kind) {
 function renderVibeItems() {
   if (state.vibeFeedLoading && !state.vibeFeed) return '<div class="vibe-loading"><i></i><strong>正在扫描全球 Vibe Coding 动态…</strong><span>GitHub · Hacker News · Global News</span></div>';
   if (!state.vibeFeed?.items?.length) return '<div class="empty-state vibe-empty">暂时没有抓取到内容。检查网络后点击“重新扫描”。</div>';
-  const items = state.vibeFeed.items.filter(item => state.vibeFilter === "all" || item.kind === state.vibeFilter);
+  const items = state.vibeFeed.items
+    .filter(item => state.vibeFilter === "all" || (state.vibeFilter === "hot" ? item.hotRank : item.kind === state.vibeFilter))
+    .sort((a, b) => state.vibeFilter === "hot" ? (a.hotRank || 99) - (b.hotRank || 99) : 0);
   if (!items.length) return '<div class="empty-state vibe-empty">这个分类暂时没有内容，试试其他筛选。</div>';
   return `<div class="vibe-grid">${items.map(item => {
     const saved = state.savedVibeIds.has(item.id);
@@ -258,11 +273,47 @@ function renderVibeItems() {
     return `<article class="vibe-card vibe-${item.kind}">
       <div class="vibe-card-top"><span class="vibe-source">${escapeHtml(item.source)}</span><span class="vibe-freshness ${item.isToday ? "today" : ""}">${item.isToday ? "今日" : formatVibeTime(item.publishedAt)}</span></div>
       <span class="vibe-kind">${vibeKindLabel(item.kind)}</span>
-      <h3>${escapeHtml(item.title)}</h3>
-      <p>${escapeHtml(item.description || "查看这条 Vibe Coding 动态的完整内容。")}</p>
+      <h3 class="vibe-chinese-summary">${escapeHtml(item.chineseSummary || "这是一条近期的 Vibe Coding 动态，可查看原文了解详情。")}</h3>
+      <p class="vibe-original-title">${escapeHtml(item.title)}</p>
+      ${item.hotRank ? `<span class="vibe-hot-badge">热度榜 #${item.hotRank}</span>` : ""}
       <div class="vibe-meta"><span>${escapeHtml(meta)}</span>${item.author ? `<span>by ${escapeHtml(item.author)}</span>` : ""}</div>
       <div class="vibe-actions"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">查看原文 ↗</a><button type="button" data-save-vibe="${item.id}" ${saved ? "disabled" : ""}>${saved ? "已收进灵感" : "＋ 收进内容灵感"}</button></div>
     </article>`;
+  }).join("")}</div>`;
+}
+
+function renderVibeHotlist() {
+  const hotItems = (state.vibeFeed?.items || []).filter(item => item.hotRank).sort((a, b) => a.hotRank - b.hotRank).slice(0, 5);
+  if (!hotItems.length) return "";
+  return `<section class="vibe-hotlist"><div class="vibe-hotlist-head"><div><span class="micro-label">WHAT'S HOT</span><h2>今日热点榜</h2></div><button type="button" data-vibe-filter="hot">查看 Top 10 →</button></div><div class="vibe-hotlist-grid">${hotItems.map(item => `
+    <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="vibe-hot-row"><strong>${String(item.hotRank).padStart(2, "0")}</strong><div><span>${vibeKindLabel(item.kind)} · ${escapeHtml(item.source)}</span><p>${escapeHtml(item.chineseSummary || item.title)}</p></div></a>`).join("")}</div></section>`;
+}
+
+function aestheticFolder(key) {
+  return aestheticFolders.find(folder => folder.key === key) || aestheticFolders[aestheticFolders.length - 1];
+}
+
+function renderAestheticFolders() {
+  const total = state.aestheticItems.length;
+  const allActive = state.aestheticFilter === "all" ? "active" : "";
+  return `<div class="aesthetic-folders"><button type="button" class="aesthetic-folder aesthetic-folder-all ${allActive}" data-aesthetic-folder="all"><span>ALL</span><strong>全部收藏</strong><small>${total} 个灵感</small></button>${aestheticFolders.map((folder, index) => {
+    const count = state.aestheticItems.filter(item => item.folder === folder.key).length;
+    return `<button type="button" class="aesthetic-folder folder-${index + 1} ${state.aestheticFilter === folder.key ? "active" : ""}" data-aesthetic-folder="${folder.key}"><i>${folder.mark}</i><span>${folder.code}</span><strong>${folder.label}</strong><small>${count} 个收藏</small></button>`;
+  }).join("")}</div>`;
+}
+
+function renderAestheticItems() {
+  const items = state.aestheticItems.filter(item => state.aestheticFilter === "all" || item.folder === state.aestheticFilter);
+  if (!items.length) {
+    const folder = state.aestheticFilter === "all" ? "审美收藏夹" : `“${aestheticFolder(state.aestheticFilter).label}”`;
+    return `<div class="aesthetic-empty"><span>✦</span><strong>${folder}还是空的</strong><p>遇到让你停下来的网页、配色或画面，就把它留在这里。</p><button type="button" class="primary-button" id="addAestheticEmpty">＋ 添加第一条收藏</button></div>`;
+  }
+  return `<div class="aesthetic-grid">${items.map((item, index) => {
+    const folder = aestheticFolder(item.folder);
+    const cover = item.imageUrl
+      ? `<img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer" />`
+      : `<div class="aesthetic-placeholder folder-${aestheticFolders.findIndex(entry => entry.key === item.folder) + 1}"><span>${folder.mark}</span><i></i><i></i><i></i></div>`;
+    return `<article class="aesthetic-item" style="--stagger:${Math.min(index, 12)}"><div class="aesthetic-cover">${cover}<span>${escapeHtml(folder.code)}</span></div><div class="aesthetic-item-body"><small>${escapeHtml(folder.label)}</small><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.note || "还没有写下喜欢它的原因。")}</p><div class="aesthetic-item-actions">${item.sourceUrl ? `<a href="${escapeHtml(item.sourceUrl)}" target="_blank" rel="noopener noreferrer">打开来源 ↗</a>` : "<span>本地灵感</span>"}<button type="button" data-edit-aesthetic="${item.id}">编辑</button></div></div></article>`;
   }).join("")}</div>`;
 }
 
@@ -398,12 +449,19 @@ const views = {
       ${renderContentColumn("已发布", "published")}
     </div>`,
 
+  aesthetic: () => `
+    <div class="page-heading aesthetic-heading"><div><span class="micro-label">AESTHETIC ARCHIVE · PERSONAL TASTE</span><h1>把喜欢留下，慢慢看见自己的<span class="accent-word">审美</span></h1></div><div class="page-heading-tools"><p>收藏不是囤积。记下你为什么停下来，久了就会形成只属于你的视觉语言。</p><button class="primary-button" id="addAesthetic">＋ 添加审美收藏</button></div></div>
+    ${renderAestheticFolders()}
+    <section class="aesthetic-collection-head"><div><span class="micro-label">COLLECTION</span><h2>${state.aestheticFilter === "all" ? "全部收藏" : aestheticFolder(state.aestheticFilter).label}</h2></div><span>${state.aestheticItems.filter(item => state.aestheticFilter === "all" || item.folder === state.aestheticFilter).length} ITEMS</span></section>
+    ${renderAestheticItems()}`,
+
   vibe: () => {
     const stats = state.vibeFeed?.stats || { today: 0, projects: 0, articles: 0, discussions: 0 };
     return `
     <div class="page-heading vibe-heading"><div><span class="micro-label">VIBE RADAR · GLOBAL</span><h1>今天，全世界用 AI <span class="accent-word">做出了什么</span></h1></div><div class="page-heading-tools"><p>聚合全球当天与最近 7 天的 Vibe Coding 新作、文章和开发者讨论。</p><button class="primary-button" id="refreshVibe" ${state.vibeFeedLoading ? "disabled" : ""}>${state.vibeFeedLoading ? "扫描中…" : "重新扫描 ↻"}</button></div></div>
     <div class="metric-row vibe-metrics"><div class="metric"><span>今日发现</span><strong>${stats.today}</strong><small>明确发布于今天</small></div><div class="metric"><span>新项目</span><strong>${stats.projects}</strong><small>GitHub 全球新作</small></div><div class="metric"><span>文章</span><strong>${stats.articles}</strong><small>媒体与创作者内容</small></div><div class="metric"><span>讨论</span><strong>${stats.discussions}</strong><small>开发者社区热议</small></div></div>
-    <section class="vibe-toolbar"><div class="vibe-filters">${[["all","全部"],["project","新作"],["article","文章"],["discussion","讨论"]].map(([value,label]) => `<button type="button" data-vibe-filter="${value}" class="${state.vibeFilter === value ? "active" : ""}">${label}</button>`).join("")}</div><span>${state.vibeFeed ? `${state.vibeFeed.cached ? "缓存结果" : "刚刚更新"} · ${state.vibeFeed.items.length} 条` : "等待第一次扫描"}</span></section>
+    ${renderVibeHotlist()}
+    <section class="vibe-toolbar"><div class="vibe-filters">${[["all","全部"],["hot","热点榜"],["project","新作"],["article","文章"],["discussion","讨论"]].map(([value,label]) => `<button type="button" data-vibe-filter="${value}" class="${state.vibeFilter === value ? "active" : ""}">${label}</button>`).join("")}</div><span>${state.vibeFeed ? `${state.vibeFeed.cached ? "缓存结果" : "刚刚更新"} · ${state.vibeFeed.items.length} 条 · ${state.vibeFeed.summaryMode === "ai" ? "AI 中文概括" : "中文说明"}` : "等待第一次扫描"}</span></section>
     ${state.vibeFeed?.errors?.length ? `<div class="vibe-source-warning">${state.vibeFeed.errors.map(escapeHtml).join(" · ")}</div>` : ""}
     ${renderVibeItems()}`;
   },
@@ -678,6 +736,13 @@ function bindViewEvents() {
   document.querySelector("#addProject")?.addEventListener("click", () => openProject());
   document.querySelectorAll("[data-edit-project]").forEach(button => button.addEventListener("click", () => openProject(Number(button.dataset.editProject))));
   document.querySelector("#addContent")?.addEventListener("click", () => openContent());
+  document.querySelector("#addAesthetic")?.addEventListener("click", () => openAesthetic());
+  document.querySelector("#addAestheticEmpty")?.addEventListener("click", () => openAesthetic(null, state.aestheticFilter));
+  document.querySelectorAll("[data-aesthetic-folder]").forEach(button => button.addEventListener("click", () => {
+    state.aestheticFilter = button.dataset.aestheticFolder;
+    render("aesthetic", { syncHistory: false });
+  }));
+  document.querySelectorAll("[data-edit-aesthetic]").forEach(button => button.addEventListener("click", () => openAesthetic(Number(button.dataset.editAesthetic))));
   document.querySelector("#refreshVibe")?.addEventListener("click", () => loadVibeFeed({ force: true }));
   document.querySelectorAll("[data-vibe-filter]").forEach(button => button.addEventListener("click", () => {
     state.vibeFilter = button.dataset.vibeFilter;
@@ -794,6 +859,23 @@ function openContent(id = null) {
   document.querySelector("#deleteContent").hidden = !item;
   document.querySelector("#contentDialog").showModal();
   setTimeout(() => document.querySelector("#contentTitle").focus(), 60);
+}
+
+function openAesthetic(id = null, preferredFolder = "all") {
+  if (!state.apiReady) return showToast("请先启动本地数据服务", true);
+  const item = id ? state.aestheticItems.find(entry => entry.id === id) : null;
+  const folder = preferredFolder !== "all" && aestheticFolders.some(entry => entry.key === preferredFolder) ? preferredFolder : "colors";
+  document.querySelector("#aestheticForm").reset();
+  document.querySelector("#aestheticId").value = item?.id || "";
+  document.querySelector("#aestheticDialogTitle").textContent = item ? "编辑审美收藏" : "添加审美收藏";
+  document.querySelector("#aestheticTitle").value = item?.title || "";
+  document.querySelector("#aestheticFolder").value = item?.folder || folder;
+  document.querySelector("#aestheticSourceUrl").value = item?.sourceUrl || "";
+  document.querySelector("#aestheticImageUrl").value = item?.imageUrl || "";
+  document.querySelector("#aestheticNote").value = item?.note || "";
+  document.querySelector("#deleteAesthetic").hidden = !item;
+  document.querySelector("#aestheticDialog").showModal();
+  setTimeout(() => document.querySelector("#aestheticTitle").focus(), 60);
 }
 
 function openTask(id = null, preferredDate = todayIso) {
@@ -1182,10 +1264,31 @@ document.querySelector("#contentForm").addEventListener("submit", async event =>
   }
 });
 
+document.querySelector("#aestheticForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const id = document.querySelector("#aestheticId").value;
+  const payload = {
+    title: document.querySelector("#aestheticTitle").value.trim(),
+    folder: document.querySelector("#aestheticFolder").value,
+    sourceUrl: document.querySelector("#aestheticSourceUrl").value.trim(),
+    imageUrl: document.querySelector("#aestheticImageUrl").value.trim(),
+    note: document.querySelector("#aestheticNote").value.trim(),
+  };
+  try {
+    await api(id ? `/api/aesthetic-items/${id}` : "/api/aesthetic-items", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
+    document.querySelector("#aestheticDialog").close();
+    state.aestheticFilter = payload.folder;
+    await loadData({ quiet: true });
+    showToast(id ? "审美收藏已更新" : "已经放进审美收藏夹");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
 function requestEntityDelete(type, id, title, sourceDialog) {
   state.pendingDeleteEntity = { type, id: Number(id), title };
   document.querySelector(`#${sourceDialog}`).close();
-  const labels = { task: "任务", project: "项目", content: "内容" };
+  const labels = { task: "任务", project: "项目", content: "内容", aesthetic: "审美收藏" };
   document.querySelector("#entityDeleteTitle").textContent = `要删除这个${labels[type]}吗？`;
   document.querySelector("#entityDeleteDescription").textContent = `“${title}”删除后无法恢复。`;
   document.querySelector("#entityDeleteDialog").showModal();
@@ -1206,10 +1309,15 @@ document.querySelector("#deleteContent").addEventListener("click", () => {
   if (id) requestEntityDelete("content", id, document.querySelector("#contentTitle").value, "contentDialog");
 });
 
+document.querySelector("#deleteAesthetic").addEventListener("click", () => {
+  const id = document.querySelector("#aestheticId").value;
+  if (id) requestEntityDelete("aesthetic", id, document.querySelector("#aestheticTitle").value, "aestheticDialog");
+});
+
 document.querySelector("#confirmDeleteEntity").addEventListener("click", async () => {
   const entity = state.pendingDeleteEntity;
   if (!entity) return;
-  const endpoints = { task: "tasks", project: "projects", content: "content" };
+  const endpoints = { task: "tasks", project: "projects", content: "content", aesthetic: "aesthetic-items" };
   try {
     await api(`/api/${endpoints[entity.type]}/${entity.id}`, { method: "DELETE" });
     document.querySelector("#entityDeleteDialog").close();

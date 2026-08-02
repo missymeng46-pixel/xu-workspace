@@ -51,6 +51,9 @@ MOBILE_ACCESS = {
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 WECHAT_CLASSIFY_LOCK = threading.Lock()
 VIBE_REFRESH_LOCK = threading.Lock()
+AESTHETIC_FOLDERS = {
+    "colors", "homepages", "typography", "charts", "three_d", "motion", "instinct",
+}
 
 
 def find_lan_ip() -> str:
@@ -233,6 +236,17 @@ def init_database() -> None:
                 cache_key TEXT PRIMARY KEY,
                 payload_json TEXT NOT NULL,
                 fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS aesthetic_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '',
+                image_url TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
@@ -671,6 +685,40 @@ def exercise_payload(db: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def validate_aesthetic_item(payload: dict, current: sqlite3.Row | None = None) -> dict:
+    def value(key: str, default: str = "") -> str:
+        if key in payload:
+            return str(payload.get(key) or "").strip()
+        return str(current[key] if current is not None else default).strip()
+
+    title = value("title")
+    folder = value("folder", "instinct")
+    if not title:
+        raise ValueError("收藏标题不能为空")
+    if folder not in AESTHETIC_FOLDERS:
+        raise ValueError("请选择有效的审美文件夹")
+
+    def web_url(payload_key: str, database_key: str, label: str) -> str:
+        if payload_key in payload:
+            raw = str(payload.get(payload_key) or "").strip()
+        else:
+            raw = str(current[database_key] if current is not None else "").strip()
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{label}需要是完整的 http 或 https 链接")
+        return raw[:2000]
+
+    return {
+        "title": title[:200],
+        "folder": folder,
+        "sourceUrl": web_url("sourceUrl", "source_url", "来源链接"),
+        "imageUrl": web_url("imageUrl", "image_url", "图片链接"),
+        "note": value("note")[:1000],
+    }
+
+
 def fetch_public_url(url: str, *, timeout: int = 12) -> bytes:
     request = Request(url, headers={"User-Agent": "XU-Workspace/1.0 (+local Vibe Radar)"})
     with urlopen(request, timeout=timeout) as response:
@@ -693,6 +741,84 @@ def published_on_local_date(value: object, target: date) -> bool:
         return published.date() == target
     except ValueError:
         return raw[:10] == target.isoformat()
+
+
+def basic_vibe_summary(item: dict) -> str:
+    if item.get("kind") == "project":
+        language = item.get("language") or "多种技术"
+        return f"这是一个使用{language}开发的 Vibe Coding 项目，目前获得 {int(item.get('stars') or 0)} 个 Star。"
+    if item.get("kind") == "discussion":
+        return f"这是 Hacker News 上的开发者讨论，目前有 {int(item.get('comments') or 0)} 条评论，可以先看观点碰撞。"
+    return f"这是一篇来自{item.get('source') or '全球媒体'}的 Vibe Coding 文章，主要讨论相关产品、趋势或实践。"
+
+
+def enrich_vibe_summaries(items: list[dict]) -> tuple[str, str]:
+    for item in items:
+        item["chineseSummary"] = basic_vibe_summary(item)
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key or not items:
+        return "basic", ""
+
+    compact_items = [
+        {
+            "index": index,
+            "kind": item.get("kind"),
+            "source": item.get("source"),
+            "title": item.get("title"),
+            "description": item.get("description"),
+            "language": item.get("language"),
+        }
+        for index, item in enumerate(items)
+    ]
+    body = json.dumps({
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是 Vibe Coding 情报编辑。把每条英文信息概括成一句自然中文，明确说明它是什么、解决什么问题或文章在讨论什么。每句 25 到 55 个汉字，不要营销话术，不要重复标题；信息不足时如实说信息有限。只返回 JSON：{\"summaries\":[{\"index\":0,\"summary\":\"...\"}]}，必须覆盖所有 index。",
+            },
+            {"role": "user", "content": json.dumps(compact_items, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 4500,
+    }, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        f"{os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com').rstrip('/')}/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=40) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        content = payload["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I)
+        summaries = json.loads(content).get("summaries", [])
+        applied = 0
+        for entry in summaries:
+            index = int(entry.get("index", -1))
+            summary = clean_feed_text(entry.get("summary"), 140)
+            if 0 <= index < len(items) and summary:
+                items[index]["chineseSummary"] = summary
+                applied += 1
+        return ("ai", "") if applied == len(items) else ("mixed", "部分内容暂时使用基础中文说明")
+    except Exception:
+        return "basic", "中文概括暂时使用基础说明"
+
+
+def vibe_hot_score(item: dict, now: datetime) -> int:
+    try:
+        published = datetime.fromisoformat(str(item.get("publishedAt") or "").replace("Z", "+00:00"))
+        if published.tzinfo is not None:
+            published = published.astimezone().replace(tzinfo=None)
+        age_hours = max(0, (now - published).total_seconds() / 3600)
+    except ValueError:
+        age_hours = 168
+    recency = max(0, 168 - age_hours) / 6
+    popularity = int(item.get("stars") or 0) * 4 + int(item.get("points") or 0) * 2 + int(item.get("comments") or 0) * 3
+    return round(popularity + recency + (15 if item.get("isToday") else 0))
 
 
 def fetch_github_vibe_items(since: date) -> list[dict]:
@@ -765,7 +891,7 @@ def fetch_news_vibe_items() -> list[dict]:
 
 def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
     cache = db.execute(
-        "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global'"
+        "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global-v2'"
     ).fetchone()
     if cache:
         try:
@@ -781,7 +907,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
     with VIBE_REFRESH_LOCK:
         # A concurrent request may have completed while this request waited for the lock.
         latest = db.execute(
-            "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global'"
+            "SELECT payload_json, fetched_at FROM vibe_feed_cache WHERE cache_key='global-v2'"
         ).fetchone()
         if latest and (not cache or latest["fetched_at"] != cache["fetched_at"]):
             try:
@@ -823,6 +949,13 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
         items.sort(key=lambda item: str(item.get("publishedAt") or ""), reverse=True)
         items.sort(key=lambda item: item["isToday"], reverse=True)
         items = items[:60]
+        summary_mode, summary_warning = enrich_vibe_summaries(items)
+        ranked = sorted(items, key=lambda item: vibe_hot_score(item, datetime.now()), reverse=True)
+        for rank, item in enumerate(ranked[:10], 1):
+            item["hotRank"] = rank
+            item["hotScore"] = vibe_hot_score(item, datetime.now())
+        if summary_warning:
+            errors.append(summary_warning)
         payload = {
             "date": today.isoformat(),
             "fetchedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -835,6 +968,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
                 "discussions": sum(1 for item in items if item["kind"] == "discussion"),
             },
             "errors": errors,
+            "summaryMode": summary_mode,
         }
         if not items and cache:
             fallback = json.loads(cache["payload_json"])
@@ -842,7 +976,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
             return fallback
         db.execute(
             """
-            INSERT INTO vibe_feed_cache(cache_key, payload_json, fetched_at) VALUES ('global', ?, CURRENT_TIMESTAMP)
+            INSERT INTO vibe_feed_cache(cache_key, payload_json, fetched_at) VALUES ('global-v2', ?, CURRENT_TIMESTAMP)
             ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, fetched_at=CURRENT_TIMESTAMP
             """,
             (json.dumps(payload, ensure_ascii=False),),
@@ -1202,6 +1336,7 @@ class XUHandler(SimpleHTTPRequestHandler):
                         "tasks": [row_dict(r) for r in db.execute("SELECT id, title, due_date AS dueDate, completed_at AS completedAt, created_at AS createdAt FROM tasks ORDER BY due_date DESC, id DESC LIMIT 200")],
                         "projects": [row_dict(r) for r in db.execute("SELECT id, title, description, status, created_at AS createdAt FROM projects ORDER BY id DESC")],
                         "contentItems": [row_dict(r) for r in db.execute("SELECT id, title, description, status, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM content_items ORDER BY id DESC")],
+                        "aestheticItems": [row_dict(r) for r in db.execute("SELECT id, title, folder, source_url AS sourceUrl, image_url AS imageUrl, note, created_at AS createdAt, updated_at AS updatedAt FROM aesthetic_items ORDER BY id DESC")],
                         "exerciseCheckins": exercise_payload(db),
                         "notes": [row_dict(r) for r in db.execute("SELECT id, title, body, source_inbox_id AS sourceInboxId, created_at AS createdAt FROM notes ORDER BY id DESC")],
                         "profile": {
@@ -1268,6 +1403,13 @@ class XUHandler(SimpleHTTPRequestHandler):
                     cursor = db.execute(
                         "INSERT INTO content_items(title, description, status) VALUES (?, ?, ?)",
                         (title[:200], description[:800], status),
+                    )
+                    self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
+                elif parsed.path == "/api/aesthetic-items":
+                    item = validate_aesthetic_item(payload)
+                    cursor = db.execute(
+                        "INSERT INTO aesthetic_items(title, folder, source_url, image_url, note) VALUES (?, ?, ?, ?, ?)",
+                        (item["title"], item["folder"], item["sourceUrl"], item["imageUrl"], item["note"]),
                     )
                     self.send_json({"id": cursor.lastrowid}, HTTPStatus.CREATED)
                 elif parsed.path == "/api/exercise":
@@ -1434,6 +1576,28 @@ class XUHandler(SimpleHTTPRequestHandler):
                 self.send_error_json(str(exc))
             return
 
+        aesthetic_match = re.fullmatch(r"/api/aesthetic-items/(\d+)", path)
+        if aesthetic_match:
+            try:
+                payload = read_json(self)
+                item_id = int(aesthetic_match.group(1))
+                with connect() as db:
+                    current = db.execute("SELECT * FROM aesthetic_items WHERE id=?", (item_id,)).fetchone()
+                    if not current:
+                        return self.send_error_json("审美收藏不存在", HTTPStatus.NOT_FOUND)
+                    item = validate_aesthetic_item(payload, current)
+                    db.execute(
+                        """
+                        UPDATE aesthetic_items SET title=?, folder=?, source_url=?, image_url=?, note=?,
+                            updated_at=CURRENT_TIMESTAMP WHERE id=?
+                        """,
+                        (item["title"], item["folder"], item["sourceUrl"], item["imageUrl"], item["note"], item_id),
+                    )
+                self.send_json({"ok": True})
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error_json(str(exc))
+            return
+
         exercise_match = re.fullmatch(r"/api/exercise/(\d+)", path)
         if exercise_match:
             try:
@@ -1559,6 +1723,14 @@ class XUHandler(SimpleHTTPRequestHandler):
         if not self.require_authorized():
             return
         path = urlparse(self.path).path
+        aesthetic_match = re.fullmatch(r"/api/aesthetic-items/(\d+)", path)
+        if aesthetic_match:
+            with connect() as db:
+                cursor = db.execute("DELETE FROM aesthetic_items WHERE id=?", (int(aesthetic_match.group(1)),))
+                if cursor.rowcount == 0:
+                    return self.send_error_json("审美收藏不存在", HTTPStatus.NOT_FOUND)
+            return self.send_json({"ok": True})
+
         exercise_match = re.fullmatch(r"/api/exercise/(\d+)", path)
         if exercise_match:
             with connect() as db:

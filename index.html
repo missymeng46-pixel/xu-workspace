@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#c9cdd0" />
     <title>序 XU · 个人工作空间</title>
-    <link rel="stylesheet" href="styles.css?v=cool-20260802-27" />
-    <link rel="stylesheet" href="theme-cool.css?v=cool-20260802-27" />
+    <link rel="stylesheet" href="styles.css?v=cool-20260802-30" />
+    <link rel="stylesheet" href="theme-cool.css?v=cool-20260802-30" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -34,6 +34,9 @@
           </button>
           <button class="nav-item" data-view="content">
             <span class="nav-icon" data-icon="pen"></span><span>内容</span>
+          </button>
+          <button class="nav-item" data-view="aesthetic">
+            <span class="nav-icon" data-icon="aesthetic"></span><span>审美收藏</span>
           </button>
           <button class="nav-item" data-view="vibe">
             <span class="nav-icon" data-icon="radar"></span><span>Vibe 雷达</span>
@@ -84,6 +87,7 @@
       <button data-view="plan"><span data-icon="calendar"></span><small>计划</small></button>
       <button data-view="finance"><span data-icon="wallet"></span><small>财务</small></button>
       <button class="mobile-capture" id="mobileCapture" aria-label="快速记录">＋</button>
+      <button data-view="aesthetic"><span data-icon="aesthetic"></span><small>审美</small></button>
       <button data-view="vibe"><span data-icon="radar"></span><small>Vibe</small></button>
       <button data-view="exercise"><span data-icon="exercise"></span><small>运动</small></button>
       <button data-view="projects"><span data-icon="layers"></span><small>项目</small></button>
@@ -249,6 +253,25 @@
       </form>
     </dialog>
 
+    <dialog id="aestheticDialog" class="aesthetic-dialog">
+      <form id="aestheticForm">
+        <input type="hidden" id="aestheticId" />
+        <div class="dialog-head">
+          <div><span class="micro-label">AESTHETIC ENTRY</span><h2 id="aestheticDialogTitle">添加审美收藏</h2></div>
+          <button type="button" class="close-button" data-close="aestheticDialog" aria-label="关闭">×</button>
+        </div>
+        <div class="aesthetic-dialog-intro"><span>✦</span><p>不用证明它为什么好。先留下，再慢慢找到自己反复喜欢的东西。</p></div>
+        <div class="form-grid project-form-grid">
+          <label class="field field-wide"><span>收藏标题</span><input id="aestheticTitle" maxlength="200" placeholder="例如：克制但温暖的奶油色首页" required /></label>
+          <label class="field field-wide"><span>放进哪个文件夹？</span><select id="aestheticFolder"><option value="colors">喜欢的配色</option><option value="homepages">喜欢的首页</option><option value="typography">喜欢的字体和排版</option><option value="charts">喜欢的图表</option><option value="three_d">喜欢的 3D</option><option value="motion">喜欢的动画</option><option value="instinct">不知道为什么，但就是喜欢</option></select></label>
+          <label class="field field-wide"><span>原网页链接（选填）</span><input id="aestheticSourceUrl" type="url" maxlength="2000" placeholder="https://example.com" /></label>
+          <label class="field field-wide"><span>预览图片链接（选填）</span><input id="aestheticImageUrl" type="url" maxlength="2000" placeholder="https://example.com/image.jpg" /></label>
+          <label class="field field-wide"><span>我为什么喜欢它？（选填）</span><textarea id="aestheticNote" maxlength="1000" placeholder="例如：留白很大胆，黄色只出现在最重要的操作上。"></textarea></label>
+        </div>
+        <div class="dialog-foot transaction-foot"><button type="button" class="danger-button" id="deleteAesthetic" hidden>删除收藏</button><div class="form-actions"><button type="button" class="secondary-button" data-close="aestheticDialog">取消</button><button class="primary-button" type="submit">保存收藏 <span>→</span></button></div></div>
+      </form>
+    </dialog>
+
     <dialog id="budgetDialog" class="budget-dialog">
       <form id="budgetForm">
         <div class="dialog-head">
@@ -349,6 +372,6 @@
 
     <div id="toast" class="toast"><span>✓</span><p></p></div>
     <script src="assets/vendor/qrcode.min.js"></script>
-    <script src="app.js?v=cool-20260802-27"></script>
+    <script src="app.js?v=cool-20260802-30"></script>
   </body>
 </html>
