@@ -16,6 +16,10 @@ const aestheticFolders = [
   { key: "instinct", label: "不知道为什么，但就是喜欢", code: "JUST LIKE", mark: "?" },
 ];
 const projectStatusLabels = { todo: "待开始", doing: "进行中", review: "待确认", done: "已完成" };
+const vibeTopics = [
+  ["all", "全部用途"], ["life", "生活"], ["work", "工作"], ["creative", "创作"],
+  ["business", "商业"], ["learning", "学习"], ["developer", "开发"], ["other", "其他"],
+];
 
 const state = {
   view: "today",
@@ -80,6 +84,7 @@ const state = {
   vibeFeed: null,
   vibeFeedLoading: false,
   vibeFilter: "all",
+  vibeTopicFilter: "all",
   savedVibeIds: new Set(),
   aestheticFilter: "all",
 };
@@ -306,10 +311,15 @@ function vibeKindLabel(kind) {
   return { project: "新作", article: "文章", discussion: "讨论" }[kind] || "动态";
 }
 
+function vibeTopicLabel(topic) {
+  return Object.fromEntries(vibeTopics)[topic] || "其他";
+}
+
 function renderVibeItems() {
   if (state.vibeFeedLoading && !state.vibeFeed) return '<div class="vibe-loading"><i></i><strong>正在扫描全球 Vibe Coding 动态…</strong><span>GitHub · Hacker News · Global News</span></div>';
   if (!state.vibeFeed?.items?.length) return '<div class="empty-state vibe-empty">暂时没有抓取到内容。检查网络后点击“重新扫描”。</div>';
   const items = state.vibeFeed.items
+    .filter(item => state.vibeTopicFilter === "all" || (item.topic || "other") === state.vibeTopicFilter)
     .filter(item => state.vibeFilter === "all" || (state.vibeFilter === "hot" ? item.hotRank : item.kind === state.vibeFilter))
     .sort((a, b) => state.vibeFilter === "hot" ? (a.hotRank || 99) - (b.hotRank || 99) : 0);
   if (!items.length) return '<div class="empty-state vibe-empty">这个分类暂时没有内容，试试其他筛选。</div>';
@@ -320,7 +330,7 @@ function renderVibeItems() {
       : item.kind === "discussion" ? `${item.points || 0} points · ${item.comments || 0} comments` : item.source;
     return `<article class="vibe-card vibe-${item.kind}">
       <div class="vibe-card-top"><span class="vibe-source">${escapeHtml(item.source)}</span><span class="vibe-freshness ${item.isToday ? "today" : ""}">${item.isToday ? "今日" : formatVibeTime(item.publishedAt)}</span></div>
-      <span class="vibe-kind">${vibeKindLabel(item.kind)}</span>
+      <div class="vibe-taxonomy"><span class="vibe-topic vibe-topic-${item.topic || "other"}">${vibeTopicLabel(item.topic)}</span><span class="vibe-kind">${vibeKindLabel(item.kind)}</span></div>
       <h3 class="vibe-chinese-summary">${escapeHtml(item.chineseSummary || "这是一条近期的 Vibe Coding 动态，可查看原文了解详情。")}</h3>
       <p class="vibe-original-title">${escapeHtml(item.title)}</p>
       ${item.hotRank ? `<span class="vibe-hot-badge">热度榜 #${item.hotRank}</span>` : ""}
@@ -334,7 +344,7 @@ function renderVibeHotlist() {
   const hotItems = (state.vibeFeed?.items || []).filter(item => item.hotRank).sort((a, b) => a.hotRank - b.hotRank).slice(0, 5);
   if (!hotItems.length) return "";
   return `<section class="vibe-hotlist"><div class="vibe-hotlist-head"><div><span class="micro-label">WHAT'S HOT</span><h2>今日热点榜</h2></div><button type="button" data-vibe-filter="hot">查看 Top 10 →</button></div><div class="vibe-hotlist-grid">${hotItems.map(item => `
-    <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="vibe-hot-row"><strong>${String(item.hotRank).padStart(2, "0")}</strong><div><span>${vibeKindLabel(item.kind)} · ${escapeHtml(item.source)}</span><p>${escapeHtml(item.chineseSummary || item.title)}</p></div></a>`).join("")}</div></section>`;
+    <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="vibe-hot-row"><strong>${String(item.hotRank).padStart(2, "0")}</strong><div><span>${vibeTopicLabel(item.topic)} · ${vibeKindLabel(item.kind)} · ${escapeHtml(item.source)}</span><p>${escapeHtml(item.chineseSummary || item.title)}</p></div></a>`).join("")}</div></section>`;
 }
 
 function aestheticFolder(key) {
@@ -527,11 +537,12 @@ const views = {
 
   vibe: () => {
     const stats = state.vibeFeed?.stats || { today: 0, projects: 0, articles: 0, discussions: 0 };
+    const topicStats = state.vibeFeed?.topicStats || {};
     return `
     <div class="page-heading vibe-heading"><div><span class="micro-label">VIBE RADAR · GLOBAL</span><h1>今天，全世界用 AI <span class="accent-word">做出了什么</span></h1></div><div class="page-heading-tools"><p>聚合全球当天与最近 7 天的 Vibe Coding 新作、文章和开发者讨论。</p><button class="primary-button" id="refreshVibe" ${state.vibeFeedLoading ? "disabled" : ""}>${state.vibeFeedLoading ? "扫描中…" : "重新扫描 ↻"}</button></div></div>
     <div class="metric-row vibe-metrics"><div class="metric"><span>今日发现</span><strong>${stats.today}</strong><small>明确发布于今天</small></div><div class="metric"><span>新项目</span><strong>${stats.projects}</strong><small>GitHub 全球新作</small></div><div class="metric"><span>文章</span><strong>${stats.articles}</strong><small>媒体与创作者内容</small></div><div class="metric"><span>讨论</span><strong>${stats.discussions}</strong><small>开发者社区热议</small></div></div>
     ${renderVibeHotlist()}
-    <section class="vibe-toolbar"><div class="vibe-filters">${[["all","全部"],["hot","热点榜"],["project","新作"],["article","文章"],["discussion","讨论"]].map(([value,label]) => `<button type="button" data-vibe-filter="${value}" class="${state.vibeFilter === value ? "active" : ""}">${label}</button>`).join("")}</div><span>${state.vibeFeed ? `${state.vibeFeed.cached ? "缓存结果" : "刚刚更新"} · ${state.vibeFeed.items.length} 条 · ${state.vibeFeed.summaryMode === "ai" ? "AI 中文概括" : "中文说明"}` : "等待第一次扫描"}</span></section>
+    <section class="vibe-toolbar"><div class="vibe-filter-stack"><div class="vibe-filter-group"><span>按用途</span><div class="vibe-filters vibe-topic-filters">${vibeTopics.map(([value,label]) => `<button type="button" data-vibe-topic="${value}" class="${state.vibeTopicFilter === value ? "active" : ""}">${label}<b>${value === "all" ? state.vibeFeed?.items?.length || 0 : topicStats[value] || 0}</b></button>`).join("")}</div></div><div class="vibe-filter-group"><span>按形式</span><div class="vibe-filters">${[["all","全部"],["hot","热点榜"],["project","新作"],["article","文章"],["discussion","讨论"]].map(([value,label]) => `<button type="button" data-vibe-filter="${value}" class="${state.vibeFilter === value ? "active" : ""}">${label}</button>`).join("")}</div></div></div><span class="vibe-feed-status">${state.vibeFeed ? `${state.vibeFeed.cached ? "缓存结果" : "刚刚更新"} · ${state.vibeFeed.items.length} 条 · ${state.vibeFeed.summaryMode === "ai" ? "AI 中文概括" : "中文说明"}` : "等待第一次扫描"}</span></section>
     ${state.vibeFeed?.errors?.length ? `<div class="vibe-source-warning">${state.vibeFeed.errors.map(escapeHtml).join(" · ")}</div>` : ""}
     ${renderVibeItems()}`;
   },
@@ -819,6 +830,10 @@ function bindViewEvents() {
     state.vibeFilter = button.dataset.vibeFilter;
     render("vibe", { syncHistory: false });
   }));
+  document.querySelectorAll("[data-vibe-topic]").forEach(button => button.addEventListener("click", () => {
+    state.vibeTopicFilter = button.dataset.vibeTopic;
+    render("vibe", { syncHistory: false });
+  }));
   document.querySelectorAll("[data-save-vibe]").forEach(button => button.addEventListener("click", async () => {
     const item = state.vibeFeed?.items?.find(entry => entry.id === button.dataset.saveVibe);
     if (!item) return;
@@ -826,7 +841,7 @@ function bindViewEvents() {
     try {
       await api("/api/content", { method: "POST", body: JSON.stringify({
         title: item.title,
-        description: `${item.description || ""}\n来源：${item.source}\n${item.url}`,
+        description: `${item.description || ""}\n分类：${vibeTopicLabel(item.topic)} · ${vibeKindLabel(item.kind)}\n来源：${item.source}\n${item.url}`,
         status: "idea",
       }) });
       state.savedVibeIds.add(item.id);

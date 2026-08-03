@@ -922,9 +922,64 @@ def basic_vibe_summary(item: dict) -> str:
     return f"这是一篇来自{item.get('source') or '全球媒体'}的 Vibe Coding 文章，主要讨论相关产品、趋势或实践。"
 
 
+VIBE_TOPIC_LABELS = {
+    "life": "生活",
+    "work": "工作",
+    "creative": "创作",
+    "business": "商业",
+    "learning": "学习",
+    "developer": "开发",
+    "other": "其他",
+}
+
+
+def classify_vibe_topic(item: dict) -> str:
+    summary = str(item.get("chineseSummary") or "")
+    if summary.startswith("这是一个使用") and "Vibe Coding 项目" in summary:
+        summary = ""
+    text = " ".join((str(item.get("title") or ""), str(item.get("description") or ""), summary)).lower()
+    keyword_groups = {
+        "life": ("health", "fitness", "wellness", "habit", "food", "recipe", "travel", "home", "family", "journal", "meditation", "personal growth", "life tracker", "生活", "健康", "运动", "饮食", "旅行", "家庭", "习惯", "人生", "个人成长", "治愈"),
+        "work": ("productivity", "workflow", "task", "calendar", "email", "meeting", "workspace", "office", "team", "automation", "效率", "工作流", "任务", "日历", "邮件", "会议", "办公", "自动化"),
+        "creative": ("video", "image", "design", "writing", "content", "blog", "social media", "podcast", "story", "creative", "视频", "图像", "设计", "写作", "内容", "博客", "播客", "内容创作"),
+        "business": ("startup", "saas", "customer", "sales", "ecommerce", "commerce", "revenue", "business", "pricing", "marketing", "创业", "客户", "销售", "电商", "营收", "商业", "定价", "营销"),
+        "learning": ("learn", "education", "research", "study", "tutor", "course", "academic", "paper", "knowledge", "学习", "教育", "研究", "课程", "论文", "知识"),
+        "developer": ("code", "coding", "developer", "github", "api", "cli", "framework", "library", "repository", "terminal", "agent", "mcp", "debug", "deploy", "编程", "开发", "代码", "框架", "终端", "部署"),
+    }
+    strong_groups = {
+        "life": ("health", "fitness", "wellness", "personal growth", "life tracker", "健康", "运动", "个人成长", "人生支线"),
+        "work": ("productivity", "workflow", "task management", "meeting", "workspace", "效率", "工作流", "任务管理", "会议", "办公"),
+        "creative": ("video", "image generation", "design tool", "writing assistant", "podcast", "视频", "图像生成", "设计工具", "写作助手", "播客"),
+        "business": ("startup", "saas", "customer", "sales", "ecommerce", "revenue", "pricing", "marketing", "创业", "客户", "销售", "电商", "营收", "定价", "营销"),
+        "learning": ("learn", "education", "research", "study", "tutor", "course", "academic", "paper", "学习", "教育", "研究", "课程", "论文"),
+    }
+    strong_scores = {topic: sum(text.count(keyword) for keyword in keywords) for topic, keywords in strong_groups.items()}
+    strongest = max(strong_scores, key=strong_scores.get)
+    if strong_scores[strongest]:
+        return strongest
+    scores = {topic: sum(text.count(keyword) for keyword in keywords) for topic, keywords in keyword_groups.items()}
+    best_topic = max(scores, key=scores.get)
+    if scores[best_topic]:
+        return best_topic
+    return "developer" if item.get("kind") == "project" else "other"
+
+
+def apply_vibe_topics(payload: dict) -> dict:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    for item in items:
+        if item.get("topic") not in VIBE_TOPIC_LABELS:
+            item["topic"] = classify_vibe_topic(item)
+    payload["topicStats"] = {
+        topic: sum(1 for item in items if item.get("topic") == topic)
+        for topic in VIBE_TOPIC_LABELS
+    }
+    return payload
+
+
 def enrich_vibe_summaries(items: list[dict]) -> tuple[str, str]:
     for item in items:
         item["chineseSummary"] = basic_vibe_summary(item)
+        item["topic"] = classify_vibe_topic(item)
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key or not items:
         return "basic", ""
@@ -937,6 +992,7 @@ def enrich_vibe_summaries(items: list[dict]) -> tuple[str, str]:
             "title": item.get("title"),
             "description": item.get("description"),
             "language": item.get("language"),
+            "suggestedTopic": item.get("topic"),
         }
         for index, item in enumerate(items)
     ]
@@ -945,7 +1001,7 @@ def enrich_vibe_summaries(items: list[dict]) -> tuple[str, str]:
         "messages": [
             {
                 "role": "system",
-                "content": "你是 Vibe Coding 情报编辑。把每条英文信息概括成一句自然中文，明确说明它是什么、解决什么问题或文章在讨论什么。每句 25 到 55 个汉字，不要营销话术，不要重复标题；信息不足时如实说信息有限。只返回 JSON：{\"summaries\":[{\"index\":0,\"summary\":\"...\"}]}，必须覆盖所有 index。",
+                "content": "你是 Vibe Coding 情报编辑。把每条英文信息概括成一句自然中文，明确说明它是什么、解决什么问题或文章在讨论什么。每句 25 到 55 个汉字，不要营销话术，不要重复标题；信息不足时如实说信息有限。同时为每条选择一个主要用途分类：life（生活）、work（工作）、creative（创作）、business（商业）、learning（学习）、developer（开发）、other（其他）。只返回 JSON：{\"summaries\":[{\"index\":0,\"summary\":\"...\",\"topic\":\"work\"}]}，必须覆盖所有 index。",
             },
             {"role": "user", "content": json.dumps(compact_items, ensure_ascii=False)},
         ],
@@ -972,6 +1028,9 @@ def enrich_vibe_summaries(items: list[dict]) -> tuple[str, str]:
             summary = clean_feed_text(entry.get("summary"), 140)
             if 0 <= index < len(items) and summary:
                 items[index]["chineseSummary"] = summary
+                topic = str(entry.get("topic") or "")
+                if topic in VIBE_TOPIC_LABELS:
+                    items[index]["topic"] = topic
                 applied += 1
         return ("ai", "") if applied == len(items) else ("mixed", "部分内容暂时使用基础中文说明")
     except Exception:
@@ -1070,7 +1129,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
             if age < (60 if force else 1800):
                 payload = json.loads(cache["payload_json"])
                 payload["cached"] = True
-                return payload
+                return apply_vibe_topics(payload)
         except (ValueError, json.JSONDecodeError):
             pass
 
@@ -1083,7 +1142,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
             try:
                 payload = json.loads(latest["payload_json"])
                 payload["cached"] = True
-                return payload
+                return apply_vibe_topics(payload)
             except json.JSONDecodeError:
                 pass
         today = date.today()
@@ -1126,7 +1185,7 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
             item["hotScore"] = vibe_hot_score(item, datetime.now())
         if summary_warning:
             errors.append(summary_warning)
-        payload = {
+        payload = apply_vibe_topics({
             "date": today.isoformat(),
             "fetchedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "cached": False,
@@ -1139,11 +1198,11 @@ def vibe_feed_payload(db: sqlite3.Connection, force: bool = False) -> dict:
             },
             "errors": errors,
             "summaryMode": summary_mode,
-        }
+        })
         if not items and cache:
             fallback = json.loads(cache["payload_json"])
             fallback.update({"cached": True, "errors": errors or ["网络不可用，正在显示上一次结果"]})
-            return fallback
+            return apply_vibe_topics(fallback)
         db.execute(
             """
             INSERT INTO vibe_feed_cache(cache_key, payload_json, fetched_at) VALUES ('global-v2', ?, CURRENT_TIMESTAMP)
